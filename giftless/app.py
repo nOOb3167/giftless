@@ -1,11 +1,14 @@
 """Main Flask application initialization code
 """
 import logging
-import os
 
 from flask import Flask
 from flask_marshmallow import Marshmallow  # type: ignore
 
+from giftless.log import init_logging
+from giftless.fix_flask_classful import fix_if_needed
+init_logging()
+fix_if_needed()
 from giftless import config, transfer, view
 from giftless.auth import authentication
 from giftless.error_handling import ApiErrorHandler
@@ -19,14 +22,6 @@ def init_app(app=None, additional_config=None):
         app = Flask(__name__)
 
     config.configure(app, additional_config=additional_config)
-
-    # Configure logging
-    if os.environ.get('GIFTLESS_DEBUG'):
-        level = logging.DEBUG
-    else:
-        level = logging.WARNING
-    logging.basicConfig(format='%(asctime)-15s %(name)-15s %(levelname)s %(message)s',
-                        level=level)
 
     # Load middleware
     _load_middleware(app)
