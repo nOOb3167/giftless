@@ -37,20 +37,6 @@ class Server(paramiko.ServerInterface):
         return True
 
 
-class TransportCtx():
-    sock: socket
-    t: paramiko.Transport
-
-    def __init__(self, sock: socket):
-        self.sock = sock
-        self.t = paramiko.Transport(self.sock)
-
-    def __enter__(self):
-        return self.t
-
-    def __exit__(self, *args):
-        self.t.close()
-
 class ChannelCtx():
     c: paramiko.Channel
 
@@ -66,7 +52,7 @@ class ChannelCtx():
         self.c.close()
 
 def stuff(known_hosts):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", 2200))
 
@@ -76,7 +62,7 @@ def stuff(known_hosts):
 
     print("Got a connection!")
 
-    with TransportCtx(client) as t:
+    with paramiko.Transport(client) as t:
         t.add_server_key(host_key)
         server = Server(known_hosts)
         t.start_server(server=server)
