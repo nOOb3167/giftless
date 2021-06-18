@@ -37,62 +37,62 @@ class Server(paramiko.ServerInterface):
         return True
 
 
+class TransportCtx():
+    sock: socket
+    t: paramiko.Transport
+
+    def __init__(self, sock: socket):
+        self.sock = sock
+        self.t = paramiko.Transport(self.sock)
+
+    def __enter__(self):
+        return self.t
+
+    def __exit__(self, *args):
+        self.t.close()
+
+class ChannelCtx():
+    c: paramiko.Channel
+
+    def __init__(self, chan: paramiko.Channel):
+        if chan is None:
+            raise RuntimeError("No channel")
+        self.c = chan
+
+    def __enter__(self):
+        return self.c
+    
+    def __exit__(self, *args):
+        self.c.close()
+
 def stuff(known_hosts):
-    DoGSSAPIKeyExchange = True
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("", 2200))
 
-    # now connect
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("", 2200))
-    except Exception as e:
-        print("*** Bind failed: " + str(e))
-        raise
-
-    try:
-        sock.listen(100)
-        print("Listening for connection ...")
-        client, addr = sock.accept()
-    except Exception as e:
-        print("*** Listen/accept failed: " + str(e))
-        raise
+    sock.listen(100)
+    print("Listening for connection ...")
+    client, addr = sock.accept()
 
     print("Got a connection!")
 
-    try:
-        t = paramiko.Transport(client)
+    with TransportCtx(client) as t:
         t.add_server_key(host_key)
         server = Server(known_hosts)
-        try:
-            t.start_server(server=server)
-        except paramiko.SSHException:
-            print("*** SSH negotiation failed.")
-            raise
+        t.start_server(server=server)
 
-        chan = t.accept(20)
-        if chan is None:
-            print("*** No channel.")
-            raise
-        print("Authenticated!")
+        with ChannelCtx(t.accept(20)) as chan:
+            print("Authenticated!")
 
-        server.event.wait(10)
-        if not server.event.is_set():
-            print("*** Client never asked for a shell.")
-            raise
+            server.event.wait(10)
+            if not server.event.is_set():
+                print("*** Client never asked for a shell.")
+                raise
 
-        chan.send("\r\n\r\nWelcome to my dorky little BBS!\r\n\r\n")
-        chan.send(
-            "We are on fire all the time!  Hooray!  Candy corn for everyone!\r\n"
-        )
-        chan.send("Happy birthday to Robot Dave!\r\n\r\n")
-        chan.send("Username: ")
-        f = chan.makefile("rU")
-        username = f.readline().strip("\r\n")
-        chan.send("\r\nI don't like you, " + username + ".\r\n")
-        chan.close()
-
-    finally:
-        t.close()
+            chan.send("Username: ")
+            f = chan.makefile("rU")
+            username = f.readline().strip("\r\n")
+            chan.send(f"\r\nReceived: {username}\r\n")
 
 def test_ssh(caplog):
     caplog.set_level(logging.INFO)
