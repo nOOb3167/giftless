@@ -1,3 +1,4 @@
+import contextlib
 import importlib.resources
 import logging
 import paramiko
@@ -41,26 +42,14 @@ class Server(paramiko.ServerInterface):
         return True
 
 
-class ChannelCtx():
-    c: paramiko.Channel
-
-    def __init__(self, chan: paramiko.Channel):
-        if chan is None:
-            raise RuntimeError("No channel")
-        self.c = chan
-
-    def __enter__(self):
-        return self.c
-    
-    def __exit__(self, *args):
-        self.c.close()
-
 def stuff(known_hosts):
     sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", 2200))
 
     sock.listen(100)
+    sock.settimeout(5)
+
     print("Listening for connection ...")
     client, addr = sock.accept()
 
@@ -71,13 +60,17 @@ def stuff(known_hosts):
         server = Server(known_hosts)
         t.start_server(server=server)
 
-        with ChannelCtx(t.accept(20)) as chan:
+        with t.accept(5) or contextlib.nullcontext() as chan:
+            if chan is None:
+                print("*** Timeout or failed authentication ***")
+                raise RuntimeError()
+
             print("Authenticated!")
 
-            server.event.wait(10)
+            server.event.wait(5)
             if not server.event.is_set():
                 print("*** Client never asked for a shell.")
-                raise
+                raise RuntimeError()
 
             chan.send("Username: ")
             f = chan.makefile("rU")
