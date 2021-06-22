@@ -27,6 +27,10 @@ class Server(paramiko.ServerInterface):
     def get_allowed_auths(self, username):
         return "publickey"
 
+    def check_channel_exec_request(self, channel, command):
+        print(f'exec {channel} @ {command}')
+        return False
+
     def check_channel_shell_request(self, channel):
         self.event.set()
         return True
