@@ -1,13 +1,58 @@
 import contextlib
+import dataclasses
 import importlib.resources
 import logging
 import paramiko
+import paramiko.pkey
 import socket
 import threading
 from binascii import hexlify
 
 with importlib.resources.path("tests", "ed25519_00.key") as keypath:
     host_key = paramiko.Ed25519Key(filename=str(keypath))
+
+@dataclasses.dataclass
+class Addr:
+    host: str
+    port: int
+
+class ThreadedClnt:
+    thr: threading.Thread
+    con_exit: threading.Event
+    addr: Addr
+
+    def __init__(self, addr: Addr):
+        self.thr = threading.Thread(target=self.run, args=(self,), daemon=False)
+        self.con_exit = threading.Event()
+        self.addr = addr
+    def __enter__(self):
+        self.thr.start()
+        return self
+    def __exit__(self, *args):
+        self.con_exit.set()
+        self.thr.join()
+        return False
+    @classmethod
+    def run(cls, self: 'ThreadedClnt'):
+        client = paramiko.SSHClient()
+        hostkeys: paramiko.HostKeys = client.get_host_keys()
+
+        with importlib.resources.path("tests", "ed25519_00.hk") as keypath:
+            hostkeys.load(filename=str(keypath))
+            assert len(hostkeys) == 1
+
+        with importlib.resources.path("tests", "ed25519_01.key") as keypath:
+            key: paramiko.pkey.PKey = paramiko.Ed25519Key(filename=str(keypath))
+
+        #client.connect(hostname=self.addr.host, port=self.addr.port, pkey=key)
+        return
+
+        while True:
+            print('hello')
+            import time
+            time.sleep(1)
+            if self.con_exit.is_set():
+                return
 
 class Server(paramiko.ServerInterface):
     def __init__(self, known_hosts):
@@ -79,6 +124,8 @@ def stuff(known_hosts):
 
 def test_ssh(caplog):
     caplog.set_level(logging.INFO)
+    with ThreadedClnt(None) as q:
+        import time; time.sleep(2)
     print(f"Read key: {hexlify(host_key.get_fingerprint())}")
     with importlib.resources.path("tests", "ed25519_au_ke") as keypath:
         known_hosts = paramiko.HostKeys(filename=str(keypath))
