@@ -21,28 +21,23 @@ class Addr:
     port: int
 
 
-class ThreadedClnt(metaclass=abc.ABCMeta):
-    thr: threading.Thread
+class ThreadedClnt(threading.Thread, metaclass=abc.ABCMeta):
     con_begin: threading.Event
     con_exit: threading.Event
 
     def __init__(self):
-        self.thr = threading.Thread(target=self._run, args=(self,), daemon=False)
+        super().__init__(name=self.__class__.__qualname__, daemon=False)
         self.con_begin = threading.Event()
         self.con_exit = threading.Event()
 
     def __enter__(self):
-        self.thr.start()
+        self.start()
         return self
 
     def __exit__(self, *args):
         self.con_exit.set()
-        self.thr.join()
+        self.join()
         return False
-
-    @staticmethod
-    def _run(self: 'ThreadedClnt'):
-        self.run()
 
     @abc.abstractmethod
     def run(self):
@@ -82,8 +77,6 @@ class ThreadedClnt1(ThreadedClnt):
             )
 
         client.exec_command('blah blah')
-
-        return
 
 
 class Server(paramiko.ServerInterface):
