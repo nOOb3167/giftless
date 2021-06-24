@@ -1,39 +1,62 @@
+import abc
 import contextlib
 import dataclasses
 import importlib.resources
 import logging
-import paramiko
-import paramiko.pkey
 import socket
 import threading
 from binascii import hexlify
 
+import paramiko
+import paramiko.pkey
+
+
 with importlib.resources.path("tests", "ed25519_00.key") as keypath:
     host_key = paramiko.Ed25519Key(filename=str(keypath))
+
 
 @dataclasses.dataclass
 class Addr:
     host: str
     port: int
 
-class ThreadedClnt:
-    thr: threading.Thread
-    con_exit: threading.Event
-    addr: Addr
 
-    def __init__(self, addr: Addr):
-        self.thr = threading.Thread(target=self.run, args=(self,), daemon=False)
+class ThreadedClnt(metaclass=abc.ABCMeta):
+    thr: threading.Thread
+    con_begin: threading.Event
+    con_exit: threading.Event
+
+    def __init__(self):
+        self.thr = threading.Thread(target=self._run, args=(self,), daemon=False)
+        self.con_begin = threading.Event()
         self.con_exit = threading.Event()
-        self.addr = addr
+
     def __enter__(self):
         self.thr.start()
         return self
+
     def __exit__(self, *args):
         self.con_exit.set()
         self.thr.join()
         return False
-    @classmethod
-    def run(cls, self: 'ThreadedClnt'):
+
+    @staticmethod
+    def _run(self: 'ThreadedClnt'):
+        self.run()
+
+    @abc.abstractmethod
+    def run(self):
+        pass
+
+
+class ThreadedClnt1(ThreadedClnt):    
+    addr: Addr
+
+    def __init__(self, addr: Addr):
+        super().__init__()
+        self.addr = addr
+
+    def run(self):
         client = paramiko.SSHClient()
         hostkeys: paramiko.HostKeys = client.get_host_keys()
 
@@ -44,19 +67,32 @@ class ThreadedClnt:
         with importlib.resources.path("tests", "ed25519_01.key") as keypath:
             key: paramiko.pkey.PKey = paramiko.Ed25519Key(filename=str(keypath))
 
-        #client.connect(hostname=self.addr.host, port=self.addr.port, pkey=key)
+        print(f"Read key2: {hexlify(key.get_fingerprint())}")
+
+        self.con_begin.wait()
+
+        client.connect(
+            hostname=self.addr.host,
+            username='robey',
+            port=self.addr.port,
+            pkey=key,
+            timeout=5,
+            banner_timeout=5,
+            auth_timeout=5
+            )
+
+        client.exec_command('blah blah')
+
         return
 
-        while True:
-            print('hello')
-            import time
-            time.sleep(1)
-            if self.con_exit.is_set():
-                return
 
 class Server(paramiko.ServerInterface):
-    def __init__(self, known_hosts):
+    known_hosts: paramiko.HostKeys
+    addr: Addr
+
+    def __init__(self, known_hosts: paramiko.HostKeys, addr: Addr):
         self.known_hosts = known_hosts
+        self.addr = addr
         self.event = threading.Event()
 
     def check_channel_request(self, kind, chanid):
@@ -65,8 +101,13 @@ class Server(paramiko.ServerInterface):
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_auth_publickey(self, username, key):
+        def addr2kh(addr: Addr):
+            return f'[{addr.host}]:{addr.port}' if addr.port else f'{addr.host}'
+
         print(f"Auth attempt with key: {hexlify(key.get_fingerprint())}")
-        if (username == "robey") and self.known_hosts.check("giftless.example", key):
+        print(f"  {username=} at {addr2kh(self.addr)}")
+        if (username == "robey") and self.known_hosts.check(addr2kh(self.addr), key):
+            print(f'AUTH_OK')
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
@@ -87,22 +128,25 @@ class Server(paramiko.ServerInterface):
         return True
 
 
-def stuff(known_hosts):
+def stuff(known_hosts: paramiko.HostKeys, clnt: ThreadedClnt1):
     sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", 2200))
+    sock.bind(("", clnt.addr.port))
 
     sock.listen(100)
     sock.settimeout(5)
 
-    print("Listening for connection ...")
+    print("Listening for connection")
+
+    clnt.con_begin.set()
+
     client, addr = sock.accept()
 
-    print("Got a connection!")
+    print("Got connection")
 
     with paramiko.Transport(client) as t:
         t.add_server_key(host_key)
-        server = Server(known_hosts)
+        server = Server(known_hosts=known_hosts, addr=clnt.addr)
         t.start_server(server=server)
 
         with t.accept(5) or contextlib.nullcontext() as chan:
@@ -124,11 +168,11 @@ def stuff(known_hosts):
 
 def test_ssh(caplog):
     caplog.set_level(logging.INFO)
-    with ThreadedClnt(None) as q:
-        import time; time.sleep(2)
-    print(f"Read key: {hexlify(host_key.get_fingerprint())}")
-    with importlib.resources.path("tests", "ed25519_au_ke") as keypath:
-        known_hosts = paramiko.HostKeys(filename=str(keypath))
-    assert "Not enough fields found" not in caplog.text
-    stuff(known_hosts=known_hosts)
+    addr = Addr(host="localhost", port=5001)
+    with ThreadedClnt1(addr) as clnt:
+        print(f"Read key: {hexlify(host_key.get_fingerprint())}")
+        with importlib.resources.path("tests", "ed25519_au_ke") as keypath:
+            known_hosts = paramiko.HostKeys(filename=str(keypath))
+        assert "Not enough fields found" not in caplog.text
+        stuff(known_hosts=known_hosts, clnt=clnt)
     assert 0
