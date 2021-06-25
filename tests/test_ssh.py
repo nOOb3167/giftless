@@ -1,18 +1,55 @@
 import abc
 import contextlib
 import dataclasses
-import importlib.resources
+import io
 import logging
 import socket
 import threading
 from binascii import hexlify
 
 import paramiko
+import paramiko.hostkeys
 import paramiko.pkey
 
+server_private_key = '''-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
+c2gtZWQyNTUxOQAAACDI9vLirefGYftjW2TwMvHs03vE1Ja6z82m/tNfmbk8sQAA
+AKAsaDjeLGg43gAAAAtzc2gtZWQyNTUxOQAAACDI9vLirefGYftjW2TwMvHs03vE
+1Ja6z82m/tNfmbk8sQAAAEByvVNWu+C19TiL6NvLle+rAzRPeLNmlJ4iRKVu28UQ
+ccj28uKt58Zh+2NbZPAy8ezTe8TUlrrPzab+01+ZuTyxAAAADmVkMjU1MTkta2V5
+LTAwAQIDBAUGBwgJCgsMDQ4P
+-----END OPENSSH PRIVATE KEY-----
+'''
+server_public_key = '[localhost]:5001 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMj28uKt58Zh+2NbZPAy8ezTe8TUlrrPzab+01+ZuTyx'
+server_auth_keys = '[localhost]:5001 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEnlZ8NXIUgkvm5RrYukkyIpSLIrkSbOv+KxUD0rh6r8'
 
-with importlib.resources.path("tests", "ed25519_00.key") as keypath:
-    host_key = paramiko.Ed25519Key(filename=str(keypath))
+client_private_key = '''-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
+c2gtZWQyNTUxOQAAACBJ5WfDVyFIJL5uUa2LpJMiKUiyK5Emzr/isVA9K4eq/AAA
+AKALQ1EOC0NRDgAAAAtzc2gtZWQyNTUxOQAAACBJ5WfDVyFIJL5uUa2LpJMiKUiy
+K5Emzr/isVA9K4eq/AAAAEBOj/PCiT5gzkhFcSqCr5F2d20AkU1G8D8vyaQUb00h
+DEnlZ8NXIUgkvm5RrYukkyIpSLIrkSbOv+KxUD0rh6r8AAAADmVkMjU1MTkta2V5
+LTAxAQIDBAUGBwgJCgsMDQ4P
+-----END OPENSSH PRIVATE KEY-----
+'''
+
+
+def hostkeys_add_from_line(hostkeys: paramiko.HostKeys, line: str):
+    prevlen = len(hostkeys)
+    hke = paramiko.hostkeys.HostKeyEntry.from_line(line)
+    hostkeys.add(hke.hostnames[0], hke.key.get_name(), hke.key)
+    assert len(hke.hostnames) == 1 and len(hostkeys) == prevlen + 1
+
+
+def hostkeys_add_from_lines(hostkeys: paramiko.HostKeys, lines: str):
+    with io.StringIO(lines) as f:
+        for line in f.readlines():
+            hostkeys_add_from_line(hostkeys, line)
+
+
+def pkey_from_str(s: str):
+    with io.StringIO(s) as f:
+        return paramiko.Ed25519Key(file_obj=f)
 
 
 @dataclasses.dataclass
@@ -44,7 +81,7 @@ class ThreadedClnt(threading.Thread, metaclass=abc.ABCMeta):
         pass
 
 
-class ThreadedClnt1(ThreadedClnt):    
+class ThreadedClnt1(ThreadedClnt):
     addr: Addr
 
     def __init__(self, addr: Addr):
@@ -53,16 +90,12 @@ class ThreadedClnt1(ThreadedClnt):
 
     def run(self):
         client = paramiko.SSHClient()
-        hostkeys: paramiko.HostKeys = client.get_host_keys()
 
-        with importlib.resources.path("tests", "ed25519_00.hk") as keypath:
-            hostkeys.load(filename=str(keypath))
-            assert len(hostkeys) == 1
+        hostkeys_add_from_line(client.get_host_keys(), server_public_key)
 
-        with importlib.resources.path("tests", "ed25519_01.key") as keypath:
-            key: paramiko.pkey.PKey = paramiko.Ed25519Key(filename=str(keypath))
+        key: paramiko.pkey.PKey = pkey_from_str(client_private_key)
 
-        print(f"Read key2: {hexlify(key.get_fingerprint())}")
+        print(f"Client key: {hexlify(key.get_fingerprint())}")
 
         self.con_begin.wait()
 
@@ -80,11 +113,11 @@ class ThreadedClnt1(ThreadedClnt):
 
 
 class Server(paramiko.ServerInterface):
-    known_hosts: paramiko.HostKeys
+    auth_keys: paramiko.HostKeys
     addr: Addr
 
-    def __init__(self, known_hosts: paramiko.HostKeys, addr: Addr):
-        self.known_hosts = known_hosts
+    def __init__(self, auth_keys: paramiko.HostKeys, addr: Addr):
+        self.auth_keys = auth_keys
         self.addr = addr
         self.event = threading.Event()
 
@@ -99,8 +132,8 @@ class Server(paramiko.ServerInterface):
 
         print(f"Auth attempt with key: {hexlify(key.get_fingerprint())}")
         print(f"  {username=} at {addr2kh(self.addr)}")
-        if (username == "robey") and self.known_hosts.check(addr2kh(self.addr), key):
-            print(f'AUTH_OK')
+        if (username == "robey") and self.auth_keys.check(addr2kh(self.addr), key):
+            print('AUTH_OK')
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
@@ -121,7 +154,7 @@ class Server(paramiko.ServerInterface):
         return True
 
 
-def stuff(known_hosts: paramiko.HostKeys, clnt: ThreadedClnt1):
+def stuff(server_key: paramiko.PKey, auth_keys: paramiko.HostKeys, clnt: ThreadedClnt1):
     sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", clnt.addr.port))
@@ -138,8 +171,8 @@ def stuff(known_hosts: paramiko.HostKeys, clnt: ThreadedClnt1):
     print("Got connection")
 
     with paramiko.Transport(client) as t:
-        t.add_server_key(host_key)
-        server = Server(known_hosts=known_hosts, addr=clnt.addr)
+        t.add_server_key(server_key)
+        server = Server(auth_keys=auth_keys, addr=clnt.addr)
         t.start_server(server=server)
 
         with t.accept(5) or contextlib.nullcontext() as chan:
@@ -159,13 +192,14 @@ def stuff(known_hosts: paramiko.HostKeys, clnt: ThreadedClnt1):
             username = f.readline().strip("\r\n")
             chan.send(f"\r\nReceived: {username}\r\n")
 
+
 def test_ssh(caplog):
     caplog.set_level(logging.INFO)
     addr = Addr(host="localhost", port=5001)
     with ThreadedClnt1(addr) as clnt:
-        print(f"Read key: {hexlify(host_key.get_fingerprint())}")
-        with importlib.resources.path("tests", "ed25519_au_ke") as keypath:
-            known_hosts = paramiko.HostKeys(filename=str(keypath))
+        server_key: paramiko.Ed25519Key = pkey_from_str(server_private_key)
+        auth_keys = paramiko.HostKeys()
+        hostkeys_add_from_lines(auth_keys, server_auth_keys)
         assert "Not enough fields found" not in caplog.text
-        stuff(known_hosts=known_hosts, clnt=clnt)
+        stuff(server_key=server_key, auth_keys=auth_keys, clnt=clnt)
     assert 0
