@@ -59,6 +59,8 @@ class Addr:
 
 
 class ThreadedClnt(threading.Thread, metaclass=abc.ABCMeta):
+    JOIN_TIMEOUT: float = 3
+
     con_begin: threading.Event
     con_exit: threading.Event
 
@@ -71,9 +73,11 @@ class ThreadedClnt(threading.Thread, metaclass=abc.ABCMeta):
         self.start()
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, exc_type, exc_value, traceback):
         self.con_exit.set()
-        self.join()
+        self.join(timeout=self.JOIN_TIMEOUT)
+        if self.is_alive():
+            raise TimeoutError('Thread join failed (by timeout)') from exc_value
         return False
 
     @abc.abstractmethod
@@ -112,85 +116,105 @@ class ThreadedClnt1(ThreadedClnt):
         client.exec_command('blah blah')
 
 
-class Server(paramiko.ServerInterface):
-    auth_keys: paramiko.HostKeys
-    addr: Addr
+class ServerCb(metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def listen_started(self):
+        pass
 
-    def __init__(self, auth_keys: paramiko.HostKeys, addr: Addr):
-        self.auth_keys = auth_keys
-        self.addr = addr
-        self.event = threading.Event()
+    @abc.abstractmethod
+    def auth_publickey(self, username, key):
+        pass
 
-    def check_channel_request(self, kind, chanid):
-        if kind == "session":
-            return paramiko.OPEN_SUCCEEDED
-        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+    @abc.abstractmethod
+    def exec_request_pre(self, channel: paramiko.Channel, command):
+        pass
 
-    def check_auth_publickey(self, username, key):
-        def addr2kh(addr: Addr):
-            return f'[{addr.host}]:{addr.port}' if addr.port else f'{addr.host}'
+    @abc.abstractmethod
+    def wait_exec(self, con_have_exec: threading.Event):
+        pass
 
-        print(f"Auth attempt with key: {hexlify(key.get_fingerprint())}")
-        print(f"  {username=} at {addr2kh(self.addr)}")
-        if (username == "robey") and self.auth_keys.check(addr2kh(self.addr), key):
-            print('AUTH_OK')
-            return paramiko.AUTH_SUCCESSFUL
-        return paramiko.AUTH_FAILED
+    def communicate(self, chan: paramiko.Channel):
+        pass
 
-    def get_allowed_auths(self, username):
+
+class Server(paramiko.ServerInterface, metaclass=abc.ABCMeta):
+    server_cb: ServerCb
+    con_have_exec: threading.Event
+
+    def __init__(self, server_cb: ServerCb):
+        self.server_cb = server_cb
+        self.con_have_exec = threading.Event()
+
+    def check_channel_request(self, kind: str, chanid: int):
+        return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+    def get_allowed_auths(self, username: str):
         return "publickey"
 
-    def check_channel_exec_request(self, channel, command):
-        print(f'exec {channel} @ {command}')
-        return False
+    def check_auth_publickey(self, username: str, key: paramiko.PKey):
+        try:
+            self.server_cb.auth_publickey(username, key)
+            return paramiko.AUTH_SUCCESSFUL
+        except Exception:
+            return paramiko.AUTH_FAILED
 
-    def check_channel_shell_request(self, channel):
-        self.event.set()
-        return True
+    def check_channel_exec_request(self, channel: paramiko.Channel, command):
+        try:
+            self.server_cb.exec_request_pre(channel, command)
+            return True
+        except Exception:
+            return False
+        finally:
+            self.con_have_exec.set()
 
-    def check_channel_pty_request(
-        self, channel, term, width, height, pixelwidth, pixelheight, modes
-    ):
-        return True
 
+def stuff(server_cb: ServerCb, server_key: paramiko.PKey, addr: Addr, accept_timeout=5):
+    server = Server(server_cb)
+    print('setting0')
 
-def stuff(server_key: paramiko.PKey, auth_keys: paramiko.HostKeys, clnt: ThreadedClnt1):
     sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", clnt.addr.port))
+    sock.bind(("", addr.port))
 
     sock.listen(100)
     sock.settimeout(5)
-
-    print("Listening for connection")
-
-    clnt.con_begin.set()
+    print('setting1')
+    server_cb.listen_started()
 
     client, addr = sock.accept()
 
-    print("Got connection")
-
     with paramiko.Transport(client) as t:
-        t.add_server_key(server_key)
-        server = Server(auth_keys=auth_keys, addr=clnt.addr)
+        t.add_server_key(key=server_key)
         t.start_server(server=server)
 
-        with t.accept(5) or contextlib.nullcontext() as chan:
+        with t.accept(accept_timeout) or contextlib.nullcontext() as chan:
             if chan is None:
-                print("*** Timeout or failed authentication ***")
-                raise RuntimeError()
+                raise RuntimeError('Timeout or failed authentication')
 
-            print("Authenticated!")
+            server_cb.wait_exec(server.con_have_exec)
 
-            server.event.wait(5)
-            if not server.event.is_set():
-                print("*** Client never asked for a shell.")
-                raise RuntimeError()
+            server_cb.communicate(chan)
 
-            chan.send("Username: ")
-            f = chan.makefile("rU")
-            username = f.readline().strip("\r\n")
-            chan.send(f"\r\nReceived: {username}\r\n")
+
+class ServerCb1(ServerCb):
+    def __init__(self, clnt):
+        self.clnt = clnt
+
+    def listen_started(self):
+        print('setting')
+        self.clnt.con_begin.set()
+
+    def auth_publickey(self, username, key):
+        print('AUPK')
+
+    def exec_request_pre(self, channel: paramiko.Channel, command):
+        print('EXRQ')
+
+    def wait_exec(self, con_have_exec: threading.Event):
+        print('WEX')
+
+    def communicate(self, chan: paramiko.Channel):
+        print('COM')
 
 
 def test_ssh(caplog):
@@ -201,5 +225,6 @@ def test_ssh(caplog):
         auth_keys = paramiko.HostKeys()
         hostkeys_add_from_lines(auth_keys, server_auth_keys)
         assert "Not enough fields found" not in caplog.text
-        stuff(server_key=server_key, auth_keys=auth_keys, clnt=clnt)
+        server_cb = ServerCb1(clnt)
+        stuff(server_cb=server_cb, server_key=server_key, addr=addr)
     assert 0
