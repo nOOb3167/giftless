@@ -170,7 +170,6 @@ class Server(paramiko.ServerInterface, metaclass=abc.ABCMeta):
 
 def stuff(server_cb: ServerCb, server_key: paramiko.PKey, addr: Addr, accept_timeout=5):
     server = Server(server_cb)
-    print('setting0')
 
     sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -178,7 +177,7 @@ def stuff(server_cb: ServerCb, server_key: paramiko.PKey, addr: Addr, accept_tim
 
     sock.listen(100)
     sock.settimeout(5)
-    print('setting1')
+
     server_cb.listen_started()
 
     client, addr = sock.accept()
@@ -228,3 +227,9 @@ def test_ssh(caplog):
         server_cb = ServerCb1(clnt)
         stuff(server_cb=server_cb, server_key=server_key, addr=addr)
     assert 0
+
+
+def test_cb():
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.create_subprocess_exec(program=R'C:\Program Files\Git\cmd\git.exe', '--version')
