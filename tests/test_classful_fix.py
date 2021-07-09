@@ -1,5 +1,6 @@
 """Tests for fix_flask_classful
 """
+import types
 
 
 class CaplogClear():
@@ -49,3 +50,42 @@ def test_error_module_exists(caplog, monkeypatch):
             giftless.classful_fix.log_print()
             assert giftless.classful_fix.module_inspect_signature(flask_classful.__dict__)
             assert 'module exists at fix_if_needed call time' in caplog.text
+
+
+def test_inspect_signature(monkeypatch):
+    def mkmod(s: str):
+        m = types.ModuleType('dummy')
+        exec(s, m.__dict__)
+        return m
+
+    monkeypatch.setenv('GIFTLESS_CLASSFUL_FIX_SKIP', '1')
+
+    import giftless.classful_fix
+
+    assert giftless.classful_fix.module_inspect_signature(mkmod(r'''\
+        class FlaskView:
+            def register(foo, bar, init_argument=None, baz=None):
+                pass
+    ''').__dict__)
+
+    assert giftless.classful_fix.module_inspect_signature(mkmod(r'''\
+        class FlaskView:
+            def register(init_argument=None):
+                pass
+    ''').__dict__)
+
+    assert not giftless.classful_fix.module_inspect_signature(mkmod(r'''\
+        class FlaskView:
+            def register():
+                pass
+    ''').__dict__)
+
+    assert not giftless.classful_fix.module_inspect_signature(mkmod(r'''\
+        class FlaskView:
+            pass
+    ''').__dict__)
+
+    assert not giftless.classful_fix.module_inspect_signature(mkmod(r'''\
+        class Foo:
+            pass
+    ''').__dict__)

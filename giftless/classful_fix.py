@@ -53,10 +53,13 @@ def module_inspect_signature(moddict: dict) -> bool:
     """Check is done by looking up and checking object from a passed module dictionary.
     Does the signature look like this: module.FlaskView.register(..., init_argument, ...)
     """
-    fw = moddict['FlaskView']
-    re = fw.register
-    ar = inspect.getfullargspec(re)
-    return 'init_argument' in ar.args
+    try:
+        fw = moddict['FlaskView']
+        re = fw.register
+        ar = inspect.getfullargspec(re)
+        return 'init_argument' in ar.args
+    except:
+        return False
 
 def import_from_packaged_wheel() -> None:
     with importlib.resources.path(PACKAGE_NAME, WHEEL_NAME) as p:
