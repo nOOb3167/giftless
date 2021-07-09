@@ -29,16 +29,25 @@ def log_print() -> None:
         l.warning(s)
     _log.clear()
 
-class ClassfulModuleRestoreOnException:
+def sys_module_remove(mod_name: str):
+    sys.modules.pop(mod_name, None)
+
+class SysModuleClearRestore:
+    mod_name: str
+    only_on_exception: bool
     mod: Optional[ModuleType]
 
+    def __init__(self, mod_name: str, only_on_exception=False):
+        self.mod_name = mod_name
+        self.only_on_exception = only_on_exception
+
     def __enter__(self):
-        self.mod = sys.modules.pop(CLASSFUL_MODULE_NAME, None)
+        self.mod = sys.modules.pop(self.mod_name, None)
         return self
 
     def __exit__(self, typ, val, tb):
-        if self.mod and val:
-            sys.modules[CLASSFUL_MODULE_NAME] = self.mod
+        if self.mod and (not self.only_on_exception or (self.only_on_exception and val)):
+            sys.modules[self.mod_name] = self.mod
 
 def module_inspect_signature(moddict: dict) -> bool:
     """Check is done by looking up and checking object from a passed module dictionary.
@@ -61,7 +70,7 @@ def fix_if_needed(force=False) -> None:
     - On failed inspection import $CLASSFUL_MODULE_NAME from our packaged wheel file.
     """
     try:
-        with ClassfulModuleRestoreOnException() as cm:
+        with SysModuleClearRestore(CLASSFUL_MODULE_NAME) as cm:
             if cm.mod:
                 log_msg('module exists at fix_if_needed call time')
             moddict = runpy.run_module(CLASSFUL_MODULE_NAME, alter_sys=True)
