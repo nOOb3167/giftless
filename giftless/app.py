@@ -6,7 +6,7 @@ import os
 from flask import Flask
 from flask_marshmallow import Marshmallow  # type: ignore
 
-from giftless import config, transfer, view
+from giftless import classful_fix, config, transfer, view
 from giftless.auth import authentication
 from giftless.error_handling import ApiErrorHandler
 from giftless.util import get_callable
@@ -27,6 +27,8 @@ def init_app(app=None, additional_config=None):
         level = logging.WARNING
     logging.basicConfig(format='%(asctime)-15s %(name)-15s %(levelname)s %(message)s',
                         level=level)
+
+    classful_fix.log_print()
 
     # Load middleware
     _load_middleware(app)
