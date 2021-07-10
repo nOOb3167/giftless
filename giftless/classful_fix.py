@@ -80,7 +80,7 @@ def fix_if_needed(force=False) -> None:
             if not module_inspect_signature(moddict) or force:
                 log_msg('applying fix')
                 import_from_packaged_wheel()
-    except:
+    except Exception:
         log_msg(f'skipped having raised [{traceback.format_exc()}]')
 
 
