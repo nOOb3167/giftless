@@ -231,5 +231,15 @@ def test_ssh(caplog):
 
 def test_cb():
     import asyncio
+    import subprocess
+    async def q():
+        coro = asyncio.create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', '--version', stdout=subprocess.PIPE)
+        m = await coro
+        stdout, stderr = await m.communicate()
+        print(type(coro))
+        print(coro)
+        print(m)
+        print(stdout, stderr)
     loop = asyncio.new_event_loop()
-    asyncio.create_subprocess_exec(program=R'C:\Program Files\Git\cmd\git.exe', '--version')
+    loop.run_until_complete(loop.create_task(q()))
+    assert 0
