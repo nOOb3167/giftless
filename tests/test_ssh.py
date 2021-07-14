@@ -1,9 +1,12 @@
 import abc
+from asyncio import create_subprocess_exec, gather, new_event_loop, StreamReader, StreamWriter
+from asyncio.subprocess import PIPE
 import contextlib
 import dataclasses
 import io
 import logging
 import socket
+import subprocess
 import threading
 from binascii import hexlify
 
@@ -230,16 +233,23 @@ def test_ssh(caplog):
 
 
 def test_cb():
-    import asyncio
-    import subprocess
+    async def wr(s, sw: StreamWriter, b: bytes):
+        print(f'{s}: {b}')
+        sw.write(b)
+        sw.write_eof()
+        await sw.wait_closed()
+    async def rd(s, sr: StreamReader):
+        while not sr.at_eof():
+            q = await sr.read(10240)
+            print(f'{s}: {q[:20]}')
     async def q():
-        coro = asyncio.create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', '--version', stdout=subprocess.PIPE)
+        coro = create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
         m = await coro
-        stdout, stderr = await m.communicate()
+        rds = gather(rd('out', m.stdout), rd('err', m.stderr), wr('in_', m.stdin, b'mypy.ini'))
         print(type(coro))
         print(coro)
         print(m)
-        print(stdout, stderr)
-    loop = asyncio.new_event_loop()
+        await rds
+    loop = new_event_loop()
     loop.run_until_complete(loop.create_task(q()))
     assert 0
