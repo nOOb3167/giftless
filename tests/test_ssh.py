@@ -1,6 +1,6 @@
 import abc
 from asyncio import create_subprocess_exec, gather, new_event_loop, StreamReader, StreamWriter
-from asyncio.events import get_event_loop
+from asyncio.events import get_running_loop
 from asyncio.subprocess import PIPE
 import contextlib
 import dataclasses
@@ -266,7 +266,7 @@ def test_cb():
     async def stuff(s):
         with contextlib.closing(s):
             while True:
-                nsock, addr = await get_event_loop().sock_accept(s)
+                nsock, addr = await get_running_loop().sock_accept(s)
                 print(f'got {nsock} | {addr}')
     async def wr(s, sw: StreamWriter, b: bytes):
         print(f'{s}: {b}')
@@ -281,7 +281,7 @@ def test_cb():
         zz = sock_for_port(4444)
         z = stuff(zz)
         ss = sock_for_conn(4444)
-        await get_event_loop().sock_sendall(ss, b'helloworld')
+        await get_running_loop().sock_sendall(ss, b'helloworld')
         await z
 
         coro = create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
