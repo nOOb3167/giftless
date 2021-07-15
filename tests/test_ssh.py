@@ -1,18 +1,27 @@
 import abc
 from asyncio import create_subprocess_exec, gather, new_event_loop, StreamReader, StreamWriter
+from asyncio.events import get_event_loop
 from asyncio.subprocess import PIPE
 import contextlib
 import dataclasses
 import io
 import logging
 import socket
-import subprocess
+from socket import AF_UNSPEC, AI_ADDRCONFIG, AI_PASSIVE, AI_V4MAPPED, SOCK_STREAM, getaddrinfo
+import pytest
 import threading
 from binascii import hexlify
 
 import paramiko
 import paramiko.hostkeys
 import paramiko.pkey
+
+# grrrr only defined in module on linux
+try:
+    from socket import SOCK_CLOEXEC, SOCK_NONBLOCK
+except Exception:
+    SOCK_CLOEXEC = 0
+    SOCK_NONBLOCK = 0
 
 server_private_key = '''-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
@@ -232,7 +241,34 @@ def test_ssh(caplog):
     assert 0
 
 
+@pytest.mark.timeout(5)
 def test_cb():
+    def sock_for_conn(port: int):
+        for family, typ, proto, canonname, sockaddr in getaddrinfo(None, port, family=AF_UNSPEC, type=SOCK_STREAM, proto=0, flags=AI_V4MAPPED | AI_ADDRCONFIG):
+            with contextlib.suppress(Exception), \
+                 contextlib.ExitStack() as es:
+                s = socket.socket(family, typ | SOCK_NONBLOCK | SOCK_CLOEXEC, proto)
+                es.enter_context(contextlib.closing(s))
+                s.connect(sockaddr)
+                es.pop_all()
+                return s
+        raise RuntimeError(f'Connecting on port {port}')
+    def sock_for_port(port: int):
+        for family, typ, proto, canonname, sockaddr in getaddrinfo(None, port, family=AF_UNSPEC, type=SOCK_STREAM, proto=0, flags=AI_PASSIVE | AI_V4MAPPED | AI_ADDRCONFIG):
+            with contextlib.suppress(Exception), \
+                 contextlib.ExitStack() as es:
+                s = socket.socket(family, typ | SOCK_NONBLOCK | SOCK_CLOEXEC, proto)
+                es.enter_context(contextlib.closing(s))
+                s.bind(sockaddr)
+                s.listen(100)
+                es.pop_all()
+                return s
+        raise RuntimeError(f'Listening on port {port}')
+    async def stuff(s):
+        with contextlib.closing(s):
+            while True:
+                nsock, addr = await get_event_loop().sock_accept(s)
+                print(f'got {nsock} | {addr}')
     async def wr(s, sw: StreamWriter, b: bytes):
         print(f'{s}: {b}')
         sw.write(b)
@@ -243,6 +279,12 @@ def test_cb():
             q = await sr.read(10240)
             print(f'{s}: {q[:20]}')
     async def q():
+        zz = sock_for_port(4444)
+        z = stuff(zz)
+        ss = sock_for_conn(4444)
+        await get_event_loop().sock_sendall(ss, b'helloworld')
+        await z
+
         coro = create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
         m = await coro
         rds = gather(rd('out', m.stdout), rd('err', m.stderr), wr('in_', m.stdin, b'mypy.ini'))
