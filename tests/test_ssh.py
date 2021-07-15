@@ -7,11 +7,10 @@ import dataclasses
 import io
 import logging
 import socket
-from socket import AF_UNSPEC, AI_ADDRCONFIG, AI_PASSIVE, AI_V4MAPPED, SOCK_STREAM, getaddrinfo
+from socket import AF_INET6, AF_UNSPEC, AI_ADDRCONFIG, AI_PASSIVE, AI_V4MAPPED, SOCK_STREAM, getaddrinfo
 import pytest
 import threading
 from binascii import hexlify
-
 import paramiko
 import paramiko.hostkeys
 import paramiko.pkey
@@ -254,7 +253,7 @@ def test_cb():
                 return s
         raise RuntimeError(f'Connecting on port {port}')
     def sock_for_port(port: int):
-        for family, typ, proto, canonname, sockaddr in getaddrinfo(None, port, family=AF_UNSPEC, type=SOCK_STREAM, proto=0, flags=AI_PASSIVE | AI_V4MAPPED | AI_ADDRCONFIG):
+        for family, typ, proto, canonname, sockaddr in getaddrinfo(None, port, family=AF_INET6, type=SOCK_STREAM, proto=0, flags=AI_PASSIVE | AI_V4MAPPED | AI_ADDRCONFIG):
             with contextlib.suppress(Exception), \
                  contextlib.ExitStack() as es:
                 s = socket.socket(family, typ | SOCK_NONBLOCK | SOCK_CLOEXEC, proto)
