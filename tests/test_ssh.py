@@ -11,6 +11,7 @@ import logging
 import socket
 from socket import AF_INET6, AF_UNSPEC, AI_ADDRCONFIG, AI_PASSIVE, AI_V4MAPPED, SOCK_STREAM, getaddrinfo
 from typing import Callable, Optional
+from paramiko.pipe import WindowsPipe
 import pytest
 import threading
 from binascii import hexlify
@@ -313,11 +314,35 @@ class AsyncServ:
                 await con_have_exec_future
                 print(f'after_have_exec')
 
+                # con_have_exec_future is 'set' from a coroutine
+                # which is queued up by asyncio.run_coroutine_threadsafe (RCT)
+                # sequence flow:
+                # 1 RCT side: call RCT, passing coroutine
+                # 2 RCT side:   queue callback on event loop
+                # 3 RCT side: wait for RCT Future
+                # 4 ths side: call callback on event loop
+                # 5 ths side:   queue coroutine on event loop
+                # 6 ths side:   enable coroutine Future done-callback (2nd callback)
+                # 7 ths side: Future being done, queue 2nd callback on event loop
+                # 8 ths side: call 2nd callback on event loop
+                # 9 ths side:   set RCT Future
+                # con_have_exec_future is set in step 5
+                # RCT Future is set in step 9
+                # event loop has to iterate between step 5 and 9
+                # iterate it by awaiting a sleep(0)
                 await sleep(0)
 
                 with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
+                    f = chan.fileno()
+                    # get_running_loop().add_reader(f, lambda x: x) # FIXME: add_reader not implemented on windows proactor event loop (asyncio limitation)
+                    with chan.lock:
+                        assert isinstance(chan._pipe, WindowsPipe) # FIXME:
+                        pipe = chan._pipe
                     chan.sendall(b'fromserv')
                     chan.shutdown_write()
+
+                    await get_running_loop().sock_recv(pipe._rsock, 1)
+                    await get_running_loop().sock_sendall(pipe._wsock, b"*")
                     z = chan.recv(X_BIG_ENUF)
                     print(f'serv recv {z}')
                     await sleep(3)
