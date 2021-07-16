@@ -1,14 +1,16 @@
 import abc
 from asyncio import AbstractEventLoop, create_subprocess_exec, Future, gather, get_running_loop, new_event_loop, run_coroutine_threadsafe, StreamReader, StreamWriter
 from asyncio.subprocess import PIPE
+from asyncio.tasks import sleep
 from collections.abc import Coroutine
 import contextlib
+import concurrent.futures
 import dataclasses
 import io
 import logging
 import socket
 from socket import AF_INET6, AF_UNSPEC, AI_ADDRCONFIG, AI_PASSIVE, AI_V4MAPPED, SOCK_STREAM, getaddrinfo
-from typing import Callable
+from typing import Callable, Optional
 import pytest
 import threading
 from binascii import hexlify
@@ -22,6 +24,9 @@ try:
 except Exception:
     SOCK_CLOEXEC = 0
     SOCK_NONBLOCK = 0
+
+# FIXME:
+X_BIG_ENUF = 1000 * 1000
 
 server_private_key = '''-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
@@ -126,7 +131,22 @@ class ThreadedClnt1(ThreadedClnt):
             auth_timeout=self.CLNT_TIMEOUT
             )
 
-        client.exec_command('blah blah')
+        lestdin = b'hello world'
+        csif, csof, csef = client.exec_command('blah blah')
+        if csif.channel is not csof.channel or csif.channel is not csef.channel:
+            raise RuntimeError()
+        chan = csif.channel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            def wi():
+                chan.sendall(lestdin)
+                chan.shutdown_write()
+            def ro():
+                return chan.recv(X_BIG_ENUF)
+            def re():
+                return chan.recv_stderr(X_BIG_ENUF)
+            subs = [executor.submit(x) for x in [wi, ro, re]]
+            for fut in concurrent.futures.as_completed(subs):
+                print(f'clnt result {fut.result()}')
 
 
 class ServerCb(metaclass=abc.ABCMeta):
@@ -246,8 +266,16 @@ def test_ssh(caplog):
         stuff(server_cb=server_cb, server_key=server_key, addr=addr)
     assert 0
 
+@contextlib.contextmanager
+def channel_ctx(t: paramiko.Transport, accept_timeout: Optional[float]):
+    with t.accept(accept_timeout) or contextlib.nullcontext() as chan:
+        if chan is None:
+            raise RuntimeError('Channel Accept Timeout')
+        yield chan
+
 
 class AsyncServ:
+    CHANNEL_ACCEPT_TIMEOUT = 120
     loop: AbstractEventLoop
     s: socket.socket
     server_key: paramiko.PKey
@@ -274,7 +302,6 @@ class AsyncServ:
                     con_have_exec_future.set_result(None)
                     print(f'exec_request_pre')
                 server = ServerX(
-                    con_have_exec=FutureEvent(con_have_exec_future),
                     loop=get_running_loop(),
                     coro_auth_publickey=auth_publickey,
                     coro_exec_request_pre=exec_request_pre)
@@ -285,6 +312,16 @@ class AsyncServ:
                 print(f'after_negotiation')
                 await con_have_exec_future
                 print(f'after_have_exec')
+
+                await sleep(0)
+
+                with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
+                    chan.sendall(b'fromserv')
+                    chan.shutdown_write()
+                    z = chan.recv(X_BIG_ENUF)
+                    print(f'serv recv {z}')
+                    await sleep(3)
+
                 return
 
 
@@ -301,14 +338,12 @@ class FutureEvent:
 
 class ServerX(paramiko.ServerInterface, metaclass=abc.ABCMeta):
     con_have_chan_request: bool
-    con_have_exec: FutureEvent
     loop: AbstractEventLoop
     coro_auth_publickey: Callable[[str, paramiko.PKey], Coroutine[None]]
     coro_exec_request_pre: Callable[[paramiko.Channel, str], Coroutine[None]]
 
-    def __init__(self, con_have_exec: FutureEvent, loop: AbstractEventLoop, coro_auth_publickey: Callable[[str, paramiko.PKey], Coroutine[None]], coro_exec_request_pre: Callable[[paramiko.Channel, str], Coroutine[None]]):
+    def __init__(self, loop: AbstractEventLoop, coro_auth_publickey: Callable[[str, paramiko.PKey], Coroutine[None]], coro_exec_request_pre: Callable[[paramiko.Channel, str], Coroutine[None]]):
         self.con_have_chan_request = False
-        self.con_have_exec = con_have_exec
         self.loop = loop
         self.coro_auth_publickey = coro_auth_publickey
         self.coro_exec_request_pre = coro_exec_request_pre
@@ -332,7 +367,6 @@ class ServerX(paramiko.ServerInterface, metaclass=abc.ABCMeta):
     def check_channel_exec_request(self, channel: paramiko.Channel, command: str):
         try:
             run_coroutine_threadsafe(self.coro_exec_request_pre(channel, command), loop=self.loop).result()
-            self.con_have_exec.set()
             return True
         except Exception:
             return False
