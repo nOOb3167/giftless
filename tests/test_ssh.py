@@ -6,6 +6,7 @@ from collections.abc import Coroutine
 import contextlib
 import concurrent.futures
 import dataclasses
+import errno
 from functools import partial
 import io
 import logging
@@ -268,12 +269,66 @@ def test_ssh(caplog):
         stuff(server_cb=server_cb, server_key=server_key, addr=addr)
     assert 0
 
+
 @contextlib.contextmanager
 def channel_ctx(t: paramiko.Transport, accept_timeout: Optional[float]):
     with t.accept(accept_timeout) or contextlib.nullcontext() as chan:
         if chan is None:
             raise RuntimeError('Channel Accept Timeout')
         yield chan
+
+
+class PipeV2(object):
+    def __init__(self):
+        with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as serv:
+            serv.bind(("127.0.0.1", 0))
+            serv.listen(1)
+            with contextlib.ExitStack() as es:
+                es.enter_context(contextlib.closing(rsock := socket.socket(socket.AF_INET, socket.SOCK_STREAM)))
+                rsock.connect(("127.0.0.1", serv.getsockname()[1]))
+                es.enter_context(contextlib.closing(wsock_addr := serv.accept()))
+                rsock.setblocking(False)
+                es.pop_all()
+                self._wsock = wsock_addr[0]
+                self._rsock = rsock
+        self._set = False
+        self._forever = False
+        self._closed = False
+
+    def close(self):
+        self._rsock.close()
+        self._wsock.close()
+        self._closed = True
+
+    def fileno(self):
+        return self._rsock.fileno()
+
+    def clear(self):
+        if not self._set or self._forever:
+            return
+        self._readall()
+        self._set = False
+
+    def set(self):
+        if self._set or self._closed:
+            return
+        self._set = True
+        self._wsock.send(b"*")
+
+    def set_forever(self):
+        self._forever = True
+        self.set()
+
+    def _readall(self):
+        while True:
+            try:
+                if len(self._rsock.recv(1024)) == 0:
+                    break
+            except socket.error as e:
+                if e.args[0] == errno.EAGAIN or e.args[0] == errno.EWOULDBLOCK:
+                    break
+                else:
+                    raise
 
 
 class AsyncServ:
