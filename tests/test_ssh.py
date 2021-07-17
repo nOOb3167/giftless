@@ -6,6 +6,7 @@ from collections.abc import Coroutine
 import contextlib
 import concurrent.futures
 import dataclasses
+from functools import partial
 import io
 import logging
 import socket
@@ -289,6 +290,12 @@ class AsyncServ:
         return self
     def run_until_complete(self):
         self.loop.run_until_complete(self.start_())
+    async def auth_publickey(self, username: str, key: paramiko.PKey):
+        print(f'auth_publickey')
+    async def exec_request_pre(self, con_have_exec_future: Future, channel: paramiko.Channel, command: str):
+        con_have_exec_future.set_result(None)
+        print(f'exec_request_pre')
+    def q2(self, a): pass
     async def start_(self):
         while True:
             nsock, addr = await get_running_loop().sock_accept(self.s)
@@ -297,15 +304,10 @@ class AsyncServ:
             with paramiko.Transport(nsock) as t:
                 protocol_negotiation_future = get_running_loop().create_future()
                 con_have_exec_future = get_running_loop().create_future()
-                async def auth_publickey(username: str, key: paramiko.PKey):
-                    print(f'auth_publickey')
-                async def exec_request_pre(channel: paramiko.Channel, command: str):
-                    con_have_exec_future.set_result(None)
-                    print(f'exec_request_pre')
                 server = ServerX(
                     loop=get_running_loop(),
-                    coro_auth_publickey=auth_publickey,
-                    coro_exec_request_pre=exec_request_pre)
+                    coro_auth_publickey=self.auth_publickey,
+                    coro_exec_request_pre=partial(self.exec_request_pre, con_have_exec_future))
                 t.add_server_key(key=self.server_key)
                 t.start_server(event=FutureEvent(protocol_negotiation_future), server=server)
                 print(f'after_start')
@@ -383,6 +385,11 @@ class ServerX(paramiko.ServerInterface, metaclass=abc.ABCMeta):
         return "publickey"
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey):
+        try:
+            q = self.coro_auth_publickey(username, key)
+            w = type(q)
+        except:
+            pass
         try:
             run_coroutine_threadsafe(self.coro_auth_publickey(username, key), loop=self.loop).result()
             return paramiko.AUTH_SUCCESSFUL
