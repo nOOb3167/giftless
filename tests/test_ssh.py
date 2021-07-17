@@ -16,6 +16,7 @@ from typing import Callable, Optional
 from paramiko.pipe import WindowsPipe
 import pytest
 import threading
+import time
 from binascii import hexlify
 import paramiko
 import paramiko.hostkeys
@@ -120,7 +121,7 @@ class ThreadedClnt1(ThreadedClnt):
 
         key: paramiko.pkey.PKey = pkey_from_str(client_private_key)
 
-        print(f"Client key: {hexlify(key.get_fingerprint())}")
+        logging.info(f"Client key: {hexlify(key.get_fingerprint())}")
 
         self.con_begin.wait()
 
@@ -134,22 +135,27 @@ class ThreadedClnt1(ThreadedClnt):
             auth_timeout=self.CLNT_TIMEOUT
             )
 
-        lestdin = b'hello world'
         csif, csof, csef = client.exec_command('blah blah')
         if csif.channel is not csof.channel or csif.channel is not csef.channel:
             raise RuntimeError()
         chan = csif.channel
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             def wi():
-                chan.sendall(lestdin)
+                chan.sendall(b'hello world 1')
+                time.sleep(1)
+                chan.sendall(b'hello world 2')
                 chan.shutdown_write()
             def ro():
-                return chan.recv(X_BIG_ENUF)
+                bio = io.BytesIO()
+                while True:
+                    if len(m := chan.recv(X_BIG_ENUF)) == 0:
+                        return bio.getvalue()
+                    bio.write(m)
             def re():
                 return chan.recv_stderr(X_BIG_ENUF)
             subs = [executor.submit(x) for x in [wi, ro, re]]
             for fut in concurrent.futures.as_completed(subs):
-                print(f'clnt result {fut.result()}')
+                logging.info(f'clnt result {fut.result()}')
 
 
 @contextlib.contextmanager
@@ -175,16 +181,16 @@ class AsyncServ:
     def run_until_complete(self):
         self.loop.run_until_complete(self.start_())
     async def auth_publickey(self, username: str, key: paramiko.PKey):
-        print(f'auth_publickey')
+        logging.info(f'auth_publickey')
     async def exec_request_pre(self, con_have_exec_future: Future, channel: paramiko.Channel, command: str):
         con_have_exec_future.set_result(None)
-        print(f'exec_request_pre')
+        logging.info(f'exec_request_pre')
     def q2(self, a): pass
     async def start_(self):
         while True:
             nsock, addr = await get_running_loop().sock_accept(self.s)
             set_nodelay(nsock)
-            print(f'got {nsock} | {addr}')
+            logging.info(f'got {nsock} | {addr}')
             with paramiko.Transport(nsock) as t:
                 protocol_negotiation_future = get_running_loop().create_future()
                 con_have_exec_future = get_running_loop().create_future()
@@ -194,30 +200,52 @@ class AsyncServ:
                     coro_exec_request_pre=partial(self.exec_request_pre, con_have_exec_future))
                 t.add_server_key(key=self.server_key)
                 t.start_server(event=FutureEvent(get_running_loop(), protocol_negotiation_future), server=server)
-                print(f'after_start')
+                logging.info(f'after_start')
                 await protocol_negotiation_future
-                print(f'after_negotiation')
+                logging.info(f'after_negotiation')
                 await con_have_exec_future
-                print(f'after_have_exec')
+                logging.info(f'after_have_exec')
 
                 await sleep(0)
 
                 with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
-                    f = chan.fileno()
-                    with chan.lock:
-                        assert isinstance(chan._pipe, WindowsPipe) # FIXME:
-                        rsock, wsock = chan._pipe._rsock, chan._pipe._wsock
-                    chan.sendall(b'fromserv')
-                    chan.shutdown_write()
+                    crw = ChannelReadWaiter(chan)
 
-                    await get_running_loop().sock_recv(rsock, 1)
-                    await get_running_loop().sock_sendall(wsock, b"*")
-                    z = chan.recv(X_BIG_ENUF)
-                    print(f'serv recv {z}')
+                    def wr_thr_fn():
+                        for x in range(3):
+                            chan.sendall(b'fromserv')
+                            time.sleep(1)
+                        chan.shutdown_write()
+
+                    wr_thr = threading.Thread(target=wr_thr_fn)
+                    wr_thr.start()
+
+                    while True:
+                        await crw.wait_read_a()
+                        z = chan.recv(X_BIG_ENUF)
+                        logging.info(f'serv recv {z}')
+                        if len(z) == 0:
+                            break
                     await sleep(3)
+                    wr_thr.join()
 
                 return
 
+
+class ChannelReadWaiter:
+    chan: paramiko.channel
+
+    def __init__(self, chan: paramiko.channel):
+        self.chan = chan
+        chan.fileno() # causes _pipe instantiation
+        with chan.lock:
+            assert isinstance(chan._pipe, WindowsPipe) # FIXME:
+            self._rsock = chan._pipe._rsock
+            self._wsock = chan._pipe._wsock
+
+    async def wait_read_a(self):
+        await get_running_loop().sock_recv(self._rsock, 1)
+        await get_running_loop().sock_sendall(self._wsock, b"*")
 
 class FutureEvent:
     loop: AbstractEventLoop
