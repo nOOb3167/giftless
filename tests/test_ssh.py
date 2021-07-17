@@ -152,183 +152,12 @@ class ThreadedClnt1(ThreadedClnt):
                 print(f'clnt result {fut.result()}')
 
 
-class ServerCb(metaclass=abc.ABCMeta):
-    @abc.abstractmethod
-    def listen_started(self):
-        pass
-
-    @abc.abstractmethod
-    def auth_publickey(self, username, key):
-        pass
-
-    @abc.abstractmethod
-    def exec_request_pre(self, channel: paramiko.Channel, command):
-        pass
-
-    @abc.abstractmethod
-    def wait_exec(self, con_have_exec: threading.Event):
-        pass
-
-    @abc.abstractmethod
-    def communicate(self, chan: paramiko.Channel):
-        pass
-
-
-class Server(paramiko.ServerInterface, metaclass=abc.ABCMeta):
-    server_cb: ServerCb
-    con_have_chan_request: bool
-    con_have_exec: threading.Event
-
-    def __init__(self, server_cb: ServerCb):
-        self.server_cb = server_cb
-        self.con_have_chan_request = False
-        self.con_have_exec = threading.Event()
-
-    def check_channel_request(self, kind: str, chanid: int):
-        first_request = self.con_have_chan_request == False
-        self.con_have_chan_request = True
-        return paramiko.OPEN_SUCCEEDED if first_request and kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
-
-    def get_allowed_auths(self, username: str):
-        return "publickey"
-
-    def check_auth_publickey(self, username: str, key: paramiko.PKey):
-        try:
-            self.server_cb.auth_publickey(username, key)
-            return paramiko.AUTH_SUCCESSFUL
-        except Exception:
-            return paramiko.AUTH_FAILED
-
-    def check_channel_exec_request(self, channel: paramiko.Channel, command):
-        try:
-            self.server_cb.exec_request_pre(channel, command)
-            return True
-        except Exception:
-            return False
-        finally:
-            self.con_have_exec.set()
-
-
-def stuff(server_cb: ServerCb, server_key: paramiko.PKey, addr: Addr, accept_timeout=5):
-    server = Server(server_cb)
-
-    sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", addr.port))
-
-    sock.listen(100)
-    sock.settimeout(5)
-
-    server_cb.listen_started()
-
-    client, addr = sock.accept()
-
-    with paramiko.Transport(client) as t:
-        t.add_server_key(key=server_key)
-        t.start_server(server=server)
-
-        with t.accept(accept_timeout) or contextlib.nullcontext() as chan:
-            if chan is None:
-                raise RuntimeError('Timeout or failed authentication')
-
-            server_cb.wait_exec(server.con_have_exec)
-
-            server_cb.communicate(chan)
-
-
-class ServerCb1(ServerCb):
-    def __init__(self, clnt):
-        self.clnt = clnt
-
-    def listen_started(self):
-        print('setting')
-        self.clnt.con_begin.set()
-
-    def auth_publickey(self, username, key):
-        print('AUPK')
-
-    def exec_request_pre(self, channel: paramiko.Channel, command):
-        print('EXRQ')
-
-    def wait_exec(self, con_have_exec: threading.Event):
-        print('WEX')
-
-    def communicate(self, chan: paramiko.Channel):
-        print('COM')
-
-
-def test_ssh(caplog):
-    caplog.set_level(logging.INFO)
-    addr = Addr(host="localhost", port=5001)
-    with ThreadedClnt1(addr) as clnt:
-        server_key: paramiko.Ed25519Key = pkey_from_str(server_private_key)
-        auth_keys = paramiko.HostKeys()
-        hostkeys_add_from_lines(auth_keys, server_auth_keys)
-        assert "Not enough fields found" not in caplog.text
-        server_cb = ServerCb1(clnt)
-        stuff(server_cb=server_cb, server_key=server_key, addr=addr)
-    assert 0
-
-
 @contextlib.contextmanager
 def channel_ctx(t: paramiko.Transport, accept_timeout: Optional[float]):
     with t.accept(accept_timeout) or contextlib.nullcontext() as chan:
         if chan is None:
             raise RuntimeError('Channel Accept Timeout')
         yield chan
-
-
-class PipeV2(object):
-    def __init__(self):
-        with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as serv:
-            serv.bind(("127.0.0.1", 0))
-            serv.listen(1)
-            with contextlib.ExitStack() as es:
-                es.enter_context(contextlib.closing(rsock := socket.socket(socket.AF_INET, socket.SOCK_STREAM)))
-                rsock.connect(("127.0.0.1", serv.getsockname()[1]))
-                es.enter_context(contextlib.closing(wsock_addr := serv.accept()))
-                rsock.setblocking(False)
-                es.pop_all()
-                self._wsock = wsock_addr[0]
-                self._rsock = rsock
-        self._set = False
-        self._forever = False
-        self._closed = False
-
-    def close(self):
-        self._rsock.close()
-        self._wsock.close()
-        self._closed = True
-
-    def fileno(self):
-        return self._rsock.fileno()
-
-    def clear(self):
-        if not self._set or self._forever:
-            return
-        self._readall()
-        self._set = False
-
-    def set(self):
-        if self._set or self._closed:
-            return
-        self._set = True
-        self._wsock.send(b"*")
-
-    def set_forever(self):
-        self._forever = True
-        self.set()
-
-    def _readall(self):
-        while True:
-            try:
-                if len(self._rsock.recv(1024)) == 0:
-                    break
-            except socket.error as e:
-                if e.args[0] == errno.EAGAIN or e.args[0] == errno.EWOULDBLOCK:
-                    break
-                else:
-                    raise
 
 
 class AsyncServ:
@@ -364,42 +193,25 @@ class AsyncServ:
                     coro_auth_publickey=self.auth_publickey,
                     coro_exec_request_pre=partial(self.exec_request_pre, con_have_exec_future))
                 t.add_server_key(key=self.server_key)
-                t.start_server(event=FutureEvent(protocol_negotiation_future), server=server)
+                t.start_server(event=FutureEvent(get_running_loop(), protocol_negotiation_future), server=server)
                 print(f'after_start')
                 await protocol_negotiation_future
                 print(f'after_negotiation')
                 await con_have_exec_future
                 print(f'after_have_exec')
 
-                # con_have_exec_future is 'set' from a coroutine
-                # which is queued up by asyncio.run_coroutine_threadsafe (RCT)
-                # sequence flow:
-                # 1 RCT side: call RCT, passing coroutine
-                # 2 RCT side:   queue callback on event loop
-                # 3 RCT side: wait for RCT Future
-                # 4 ths side: call callback on event loop
-                # 5 ths side:   queue coroutine on event loop
-                # 6 ths side:   enable coroutine Future done-callback (2nd callback)
-                # 7 ths side: Future being done, queue 2nd callback on event loop
-                # 8 ths side: call 2nd callback on event loop
-                # 9 ths side:   set RCT Future
-                # con_have_exec_future is set in step 5
-                # RCT Future is set in step 9
-                # event loop has to iterate between step 5 and 9
-                # iterate it by awaiting a sleep(0)
                 await sleep(0)
 
                 with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
                     f = chan.fileno()
-                    # get_running_loop().add_reader(f, lambda x: x) # FIXME: add_reader not implemented on windows proactor event loop (asyncio limitation)
                     with chan.lock:
                         assert isinstance(chan._pipe, WindowsPipe) # FIXME:
-                        pipe = chan._pipe
+                        rsock, wsock = chan._pipe._rsock, chan._pipe._wsock
                     chan.sendall(b'fromserv')
                     chan.shutdown_write()
 
-                    await get_running_loop().sock_recv(pipe._rsock, 1)
-                    await get_running_loop().sock_sendall(pipe._wsock, b"*")
+                    await get_running_loop().sock_recv(rsock, 1)
+                    await get_running_loop().sock_sendall(wsock, b"*")
                     z = chan.recv(X_BIG_ENUF)
                     print(f'serv recv {z}')
                     await sleep(3)
@@ -408,14 +220,15 @@ class AsyncServ:
 
 
 class FutureEvent:
+    loop: AbstractEventLoop
     future: Future
 
-    def __init__(self, future: Future):
+    def __init__(self, loop: AbstractEventLoop, future: Future):
+        self.loop = loop
         self.future = future
     
     def set(self):
-        # loop.call_soon_threadsafe?
-        self.future.set_result(None)
+        self.loop.call_soon_threadsafe(self.future.set_result, None)
 
 
 class ServerX(paramiko.ServerInterface, metaclass=abc.ABCMeta):
@@ -440,11 +253,6 @@ class ServerX(paramiko.ServerInterface, metaclass=abc.ABCMeta):
         return "publickey"
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey):
-        try:
-            q = self.coro_auth_publickey(username, key)
-            w = type(q)
-        except:
-            pass
         try:
             run_coroutine_threadsafe(self.coro_auth_publickey(username, key), loop=self.loop).result()
             return paramiko.AUTH_SUCCESSFUL
