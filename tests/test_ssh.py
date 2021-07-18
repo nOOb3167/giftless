@@ -336,6 +336,10 @@ def test_ssh_2(caplog):
 def test_cancel():
     async def b():
         q = get_running_loop().create_task(sleep(100), name='bsleep')
+        for z in asyncio.all_tasks():
+            import sys
+            print('stack', file=sys.stderr)
+            z.print_stack()
         await q
     async def c():
         z0 = b()
