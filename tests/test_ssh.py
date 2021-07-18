@@ -183,7 +183,7 @@ class AsyncServ:
     async def auth_publickey(self, username: str, key: paramiko.PKey):
         logging.info(f'auth_publickey')
     async def exec_request_pre(self, con_have_exec_future: Future, channel: paramiko.Channel, command: str):
-        con_have_exec_future.set_result(None)
+        con_have_exec_future.set_result(command)
         logging.info(f'exec_request_pre')
     async def start_(self):
         cons: set = set()
@@ -209,13 +209,104 @@ class AsyncServ:
             logging.info(f'after_start')
             await protocol_negotiation_future
             logging.info(f'after_negotiation')
-            await con_have_exec_future
+            command = await con_have_exec_future
             logging.info(f'after_have_exec')
 
             await sleep(0)
 
             with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
                 crw = ChannelReadWaiter(chan)
+
+                comO, comE, comI = [io.BytesIO() for x in range(3)]
+                comOc, comEc, comIc = [threading.Condition() for x in range(3)]
+
+                async def com_wr(sw: StreamWriter, b: io.BytesIO, c: threading.Condition):
+                    while True:
+                        with c:
+                            c.wait_for(len(b.getbuffer()))
+                            sw.write(b.getvalue())
+                            b.seek(0)
+                            b.truncate()
+                            await sw.drain()
+                    #sw.write_eof()
+                    #await sw.wait_closed()
+                async def com_rd(sr: StreamReader, b: io.BytesIO, c: threading.Condition):
+                    while not sr.at_eof():
+                        data = await sr.read(1024)
+                        with c:
+                            b.write(data)
+                            c.notify_all()
+                async def chan_rd(crw: ChannelReadWaiter, chan: paramiko.Channel, b: io.BytesIO, c: threading.Condition):
+                    while True:
+                        await crw.wait_read_a()
+                        data = chan.recv(X_BIG_ENUF)
+                        if len(data) == 0:
+                            break
+                        with c:
+                            b.write(data)
+                            c.notify_all()
+                def chan_wr(b: io.BytesIO, c: threading.Condition, s: Callable[[str], None]):
+                    while True:
+                        with c:
+                            c.wait_for(len(b.getbuffer()))
+                            data = b.getvalue()
+                            b.seek(0)
+                            b.truncate()
+                        chan.sendall(data)
+                    chan.shutdown_write()
+
+                @contextlib.asynccontextmanager
+                async def queue_get(b: asyncio.Queue):
+                    i = await b.get()
+                    try:
+                        yield i
+                    finally:
+                        b.task_done()
+                class Eof:
+                    pass
+
+                comOq, comEq, comIq = [asyncio.Queue() for x in range(3)]
+                async def com_rd(sr: StreamReader, b: asyncio.Queue):
+                    while True:
+                        data = await sr.read(1024)
+                        data = data if len(data) else Eof()
+                        b.put_nowait(data)
+                        if isinstance(data, Eof):
+                            break
+                async def com_wr(sw: StreamWriter, b: asyncio.Queue):
+                    while True:
+                        async with queue_get(b) as i:
+                            if isinstance(i, Eof):
+                                sw.write_eof()
+                                await sw.wait_closed()
+                                break
+                            else:
+                                sw.write(i)
+                                await sw.drain()
+                async def chan_rd(crw: ChannelReadWaiter, chan: paramiko.Channel, b: asyncio.Queue):
+                    while True:
+                        await crw.wait_read_a()
+                        data = chan.recv(X_BIG_ENUF)
+                        data = data if len(data) else Eof()
+                        b.put_nowait(data)
+                        if isinstance(data, Eof):
+                            break
+                def chan_wr(b: io.BytesIO, c: threading.Condition, s: Callable[[str], None]):
+                    # hmm no separate shutdown for stdout and stderr - chan.shutdown_write shuts down the channel
+                    chan.sendall(b'nothing')
+                    chan.shutdown_write()
+
+                proc = await create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
+                rds = await gather(
+                    com_rd(proc.stdout, comOq),
+                    com_rd(proc.stderr, comEq),
+                    com_wr(proc.stdin, comIq),
+                    chan_rd(crw, chan, comIq),
+                    asyncio.to_thread(chan_wr, comO, comOc, chan.sendall),
+                    asyncio.to_thread(chan_wr, comE, comEc, chan.sendall_stderr),
+                    proc)
+
+                #chan.send_exit_status(rds[_proc_])
 
                 def wr_thr_fn():
                     for x in range(3):
