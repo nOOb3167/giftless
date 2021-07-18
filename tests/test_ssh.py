@@ -135,17 +135,15 @@ class ThreadedClnt1(ThreadedClnt):
             auth_timeout=self.CLNT_TIMEOUT
             )
 
-        csif, csof, csef = client.exec_command('blah blah')
+        csif, csof, csef = client.exec_command('printhelper.exe')
         if csif.channel is not csof.channel or csif.channel is not csef.channel:
             raise RuntimeError()
         chan = csif.channel
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             def wi():
                 chan.sendall(b'hello world 1')
-                chan.sendall_stderr(b'hello world 1')
                 time.sleep(1)
                 chan.sendall(b'hello world 2')
-                chan.sendall_stderr(b'hello world 2')
                 chan.shutdown_write()
             def ro():
                 bio = io.BytesIO()
@@ -254,15 +252,21 @@ class AsyncServ:
                 async def chan_rd(crw: ChannelReadWaiter, chan: paramiko.Channel, b: asyncio.Queue):
                     while True:
                         await crw.wait_read_a()
-                        data = chan.recv(X_BIG_ENUF)
-                        data = data if len(data) else Eof()
-                        b.put_nowait(data)
-                        if isinstance(data, Eof):
-                            break
-                def chan_wr(sendallfunc: Callable[[str], None]):
-                    # hmm no separate shutdown for stdout and stderr - chan.shutdown_write shuts down the channel
-                    sendallfunc(b'nothing')
-                    #chan.shutdown_write()
+                        if chan.recv_stderr_ready():
+                            raise RuntimeError('unexpected')
+                        if chan.recv_ready():
+                            data = r if len(r := chan.recv(X_BIG_ENUF)) else Eof()
+                            b.put_nowait(data)
+                            if isinstance(data, Eof):
+                                break
+                async def chan_wr(sendallfunc: Callable[[str], None], b: asyncio.Queue):
+                    def wr(sendallfunc: Callable[[str], None], data: bytes):
+                        sendallfunc(b'nothing')
+                    async with queue_get(b) as i:
+                        if isinstance(i, Eof):
+                            pass
+                        else:
+                            await asyncio.to_thread(wr, sendallfunc, data)
 
                 #proc = await create_subprocess_exec(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
                 proc = await create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
@@ -276,8 +280,6 @@ class AsyncServ:
                     proc.wait())
 
                 #chan.send_exit_status(rds[_proc_])
-
-                await sleep(3)
 
             return
 
