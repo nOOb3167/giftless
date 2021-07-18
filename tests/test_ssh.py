@@ -1,5 +1,6 @@
 import abc
 from asyncio import AbstractEventLoop, create_subprocess_exec, Future, gather, get_running_loop, new_event_loop, run_coroutine_threadsafe, StreamReader, StreamWriter
+import asyncio
 from asyncio.subprocess import PIPE
 from asyncio.tasks import sleep
 from collections.abc import Coroutine
@@ -185,7 +186,6 @@ class AsyncServ:
     async def exec_request_pre(self, con_have_exec_future: Future, channel: paramiko.Channel, command: str):
         con_have_exec_future.set_result(None)
         logging.info(f'exec_request_pre')
-    def q2(self, a): pass
     async def start_(self):
         while True:
             nsock, addr = await get_running_loop().sock_accept(self.s)
@@ -325,6 +325,40 @@ def test_ssh_2(caplog):
             serv = AsyncServ(sock, server_key)
             serv.run_until_complete()
     assert 0
+
+
+def test_cancel():
+    async def b():
+        q = get_running_loop().create_task(sleep(100), name='bsleep')
+        await q
+    async def c():
+        z0 = b()
+        z1 = get_running_loop().create_task(sleep(100))
+        await z0
+        await z1
+    async def c2():
+        z0 = b()
+        z1 = get_running_loop().create_task(sleep(100))
+        asyncio.gather(z0, z1)
+    async def a():
+        z0 = get_running_loop().create_task(c())
+        await sleep(0)
+        await sleep(0)
+        await sleep(0)
+        await sleep(0)
+        await sleep(0)
+        await sleep(0)
+        await sleep(0)
+        z0.cancel()
+        await z0
+    loop = new_event_loop()
+    try:
+        loop.run_until_complete(a())
+    except BaseException as e:
+        print('zzz')
+        for t in asyncio.all_tasks(loop):
+            print(f'ttt {t}')
+        raise
 
 
 @pytest.mark.timeout(5)
