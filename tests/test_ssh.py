@@ -2,12 +2,11 @@ import abc
 from asyncio import AbstractEventLoop, create_subprocess_exec, Future, gather, get_running_loop, new_event_loop, run_coroutine_threadsafe, StreamReader, StreamWriter
 import asyncio
 from asyncio.subprocess import PIPE
-from asyncio.tasks import sleep
+from asyncio.tasks import FIRST_COMPLETED, sleep
 from collections.abc import Coroutine
 import contextlib
 import concurrent.futures
 import dataclasses
-import errno
 from functools import partial
 import io
 import logging
@@ -187,49 +186,56 @@ class AsyncServ:
         con_have_exec_future.set_result(None)
         logging.info(f'exec_request_pre')
     async def start_(self):
+        cons: set = set()
         while True:
-            nsock, addr = await get_running_loop().sock_accept(self.s)
-            set_nodelay(nsock)
-            logging.info(f'got {nsock} | {addr}')
-            with paramiko.Transport(nsock) as t:
-                protocol_negotiation_future = get_running_loop().create_future()
-                con_have_exec_future = get_running_loop().create_future()
-                server = ServerX(
-                    loop=get_running_loop(),
-                    coro_auth_publickey=self.auth_publickey,
-                    coro_exec_request_pre=partial(self.exec_request_pre, con_have_exec_future))
-                t.add_server_key(key=self.server_key)
-                t.start_server(event=FutureEvent(get_running_loop(), protocol_negotiation_future), server=server)
-                logging.info(f'after_start')
-                await protocol_negotiation_future
-                logging.info(f'after_negotiation')
-                await con_have_exec_future
-                logging.info(f'after_have_exec')
+            accept_task = get_running_loop().create_task(get_running_loop().sock_accept(self.s))
+            wait_list = cons | {accept_task}
+            done, pending = await asyncio.wait(wait_list, return_when=FIRST_COMPLETED)
+            if accept_task in done:
+                nsock, addr = accept_task.result()
+                set_nodelay(nsock)
+                logging.info(f'got {str(nsock)[:50]} | {addr}')
+                cons |= {get_running_loop().create_task(self.start_con(nsock))}
+    async def start_con(self, nsock: socket.socket):
+        with paramiko.Transport(nsock) as t:
+            protocol_negotiation_future = get_running_loop().create_future()
+            con_have_exec_future = get_running_loop().create_future()
+            server = ServerX(
+                loop=get_running_loop(),
+                coro_auth_publickey=self.auth_publickey,
+                coro_exec_request_pre=partial(self.exec_request_pre, con_have_exec_future))
+            t.add_server_key(key=self.server_key)
+            t.start_server(event=FutureEvent(get_running_loop(), protocol_negotiation_future), server=server)
+            logging.info(f'after_start')
+            await protocol_negotiation_future
+            logging.info(f'after_negotiation')
+            await con_have_exec_future
+            logging.info(f'after_have_exec')
 
-                await sleep(0)
+            await sleep(0)
 
-                with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
-                    crw = ChannelReadWaiter(chan)
+            with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
+                crw = ChannelReadWaiter(chan)
 
-                    def wr_thr_fn():
-                        for x in range(3):
-                            chan.sendall(b'fromserv')
-                            time.sleep(1)
-                        chan.shutdown_write()
+                def wr_thr_fn():
+                    for x in range(3):
+                        chan.sendall(b'fromserv')
+                        time.sleep(1)
+                    chan.shutdown_write()
 
-                    wr_thr = threading.Thread(target=wr_thr_fn)
-                    wr_thr.start()
+                wr_thr = threading.Thread(target=wr_thr_fn)
+                wr_thr.start()
 
-                    while True:
-                        await crw.wait_read_a()
-                        z = chan.recv(X_BIG_ENUF)
-                        logging.info(f'serv recv {z}')
-                        if len(z) == 0:
-                            break
-                    await sleep(3)
-                    wr_thr.join()
+                while True:
+                    await crw.wait_read_a()
+                    z = chan.recv(X_BIG_ENUF)
+                    logging.info(f'serv recv {z}')
+                    if len(z) == 0:
+                        break
+                await sleep(3)
+                wr_thr.join()
 
-                return
+            return
 
 
 class ChannelReadWaiter:
