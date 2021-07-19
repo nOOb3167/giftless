@@ -15,7 +15,9 @@ from socket import AF_INET6, AF_UNSPEC, AI_ADDRCONFIG, AI_PASSIVE, AI_V4MAPPED, 
 from typing import Callable, Optional
 from paramiko.pipe import WindowsPipe
 import pytest
+import select
 import threading
+import traceback
 import time
 from binascii import hexlify
 import paramiko
@@ -79,6 +81,25 @@ class Addr:
     port: int
 
 
+def exclog(fn):
+    def call(*args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except BaseException:
+            logging.info('ExcLog From')
+            logging.info(f'{traceback.format_exc()}')
+            raise
+    return call
+
+
+def chan_sendall(chan: paramiko.Channel, b: bytes):
+    # paramiko source channel.py about raising OSError : 'this doesn't seem useful, but it is the documented behavior'
+    with contextlib.suppress(OSError):
+        chan.sendall(b)
+def chanfile_write(chanfile, b: bytes):
+    with contextlib.suppress(OSError):
+        chanfile.write(b)
+
 class ThreadedClnt(threading.Thread, metaclass=abc.ABCMeta):
     JOIN_TIMEOUT: float = 3
 
@@ -135,25 +156,38 @@ class ThreadedClnt1(ThreadedClnt):
             auth_timeout=self.CLNT_TIMEOUT
             )
 
-        csif, csof, csef = client.exec_command('printhelper.exe')
+        csif, csof, csef = client.exec_command(R'C:\Users\Andrej\source\repos\printhelper\x64\Release\printhelper.exe')
+        #csif, csof, csef = client.exec_command('printhelper.exe')
         if csif.channel is not csof.channel or csif.channel is not csef.channel:
             raise RuntimeError()
         chan = csif.channel
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             def wi():
-                chan.sendall(b'hello world 1')
+                chanfile_write(csif, b'hello world 1')
+                csif.flush()
+                chanfile_write(csif, b'hello world 2')
+                csif.flush()
                 time.sleep(1)
-                chan.sendall(b'hello world 2')
-                chan.shutdown_write()
+                chanfile_write(csif, b'hello world 3')
+                csif.flush()
+                csif.close()
             def ro():
                 bio = io.BytesIO()
                 while True:
-                    if len(m := chan.recv(X_BIG_ENUF)) == 0:
+                    logging.info('zzzz')
+                    data = csof.read(X_BIG_ENUF)
+                    logging.info(f'zzzz2 {data}')
+                    bio.write(data)
+                    if not len(data):
                         return bio.getvalue()
-                    bio.write(m)
             def re():
-                return chan.recv_stderr(X_BIG_ENUF)
-            subs = [executor.submit(x) for x in [wi, ro, re]]
+                bio = io.BytesIO()
+                while True:
+                    data = csef.read(X_BIG_ENUF)
+                    bio.write(data)
+                    if not len(data):
+                        return bio.getvalue()
+            subs = [executor.submit(x) for x in [exclog(wi), exclog(ro), exclog(re)]]
             for fut in concurrent.futures.as_completed(subs):
                 logging.info(f'clnt result {fut.result()}')
 
@@ -235,6 +269,7 @@ class AsyncServ:
                     while True:
                         data = await sr.read(1024)
                         data = data if len(data) else Eof()
+                        logging.info(f'com_rd {data}')
                         b.put_nowait(data)
                         if isinstance(data, Eof):
                             break
@@ -266,10 +301,23 @@ class AsyncServ:
                         if isinstance(i, Eof):
                             pass
                         else:
-                            await asyncio.to_thread(wr, sendallfunc, data)
+                            await asyncio.to_thread(wr, sendallfunc, i)
 
-                #proc = await create_subprocess_exec(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-                proc = await create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
+                #proc = await create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
+                proc = await create_subprocess_exec(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+                # async def wx():
+                #     logging.info('tttt')
+                #     proc.stdin.write(b'yes')
+                #     logging.info('tttt3')
+                #     await proc.stdin.drain()
+                #     logging.info('tttt2')
+                #     proc.stdin.write_eof()
+                # async def rx():
+                #     data = proc.stdout.read(1024)
+                #     logging.info('yyyy {data}')
+                # await wx()
+                # await com_rd(proc.stdout, comOq)
+                # logging.info('past')
                 rds = await gather(
                     com_rd(proc.stdout, comOq),
                     com_rd(proc.stderr, comEq),
@@ -279,6 +327,7 @@ class AsyncServ:
                     asyncio.to_thread(chan_wr, chan.sendall_stderr),
                     proc.wait())
 
+                logging.info(f'rds {rds}')
                 #chan.send_exit_status(rds[_proc_])
 
             return
@@ -286,14 +335,21 @@ class AsyncServ:
 
 class ChannelReadWaiter:
     chan: paramiko.channel
+    fileno: int
+    _rsock: socket.socket
+    _wsock: socket.socket
 
     def __init__(self, chan: paramiko.channel):
         self.chan = chan
-        chan.fileno() # causes _pipe instantiation
+        self.fileno = chan.fileno() # causes _pipe instantiation
         with chan.lock:
             assert isinstance(chan._pipe, WindowsPipe) # FIXME:
             self._rsock = chan._pipe._rsock
             self._wsock = chan._pipe._wsock
+
+    def wait_read(self):
+        rl, wl, xl = select.select([self.fileno], [], [])
+        assert len(rl) and rl[0] == self.fileno
 
     async def wait_read_a(self):
         await get_running_loop().sock_recv(self._rsock, 1)
@@ -456,12 +512,12 @@ def test_cb():
             print(f'{s}: {q[:20]}')
     async def q():
         zz = sock_for_port(4444)
-        z = stuff(zz)
+        #z = stuff(zz)
         ss = sock_for_conn(4444)
         await get_running_loop().sock_sendall(ss, b'helloworld')
-        await z
+        #await z
 
-        coro = create_subprocess_exec(R'C:\Program Files\Git\cmd\git.exe', 'log', '--', stdin=PIPE, stdout=PIPE, stderr=PIPE)
+        coro = create_subprocess_exec('printhelper.exe', stdin=PIPE, stdout=PIPE, stderr=PIPE)
         m = await coro
         rds = gather(rd('out', m.stdout), rd('err', m.stderr), wr('in_', m.stdin, b'mypy.ini'))
         print(type(coro))
