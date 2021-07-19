@@ -435,6 +435,16 @@ def test_ssh_2(caplog):
     assert 0
 
 
+@pytest.mark.timeout(5)
+def test_ssh_3(caplog):
+    caplog.set_level(logging.INFO)
+    addr = Addr(host="localhost", port=5001)
+    with contextlib.closing(sock_for_port_serv(addr.port)) as sock:
+        with ThreadedClnt1(addr) as clnt:
+            clnt.con_begin.set()
+            import giftless.auth.ssh
+            giftless.auth.ssh.start_server(sock)
+
 def test_cancel():
     async def b():
         q = get_running_loop().create_task(sleep(100), name='bsleep')
