@@ -37,6 +37,15 @@ class CtxAdapter(logging.LoggerAdapter):
         return f'''[conid={ctx_conid.get('root')}] {msg}''', kwargs
 
 
+@contextlib.contextmanager
+def with_ctx_conid(conid: int):
+    token = ctx_conid.set(conid)
+    try:
+        yield
+    finally:
+        ctx_conid.reset(token)
+
+
 log = CtxAdapter(logging.getLogger(__name__), extra={})
 
 Addr = collections.namedtuple('Addr', ['host', 'port'])
@@ -87,7 +96,8 @@ class AsyncServ:
             if accept in done:
                 nsock, addr = accept.result()
                 log.info(f'Connected from address: {addr}')
-                wait |= {loop().create_task(self.start_con((conid := conid + 1), nsock))}
+                with with_ctx_conid((conid := conid + 1)):
+                    wait |= {loop().create_task(self.start_con(nsock))}
                 accept = None
 
     async def cb_auth_publickey(self, username: str, key: paramiko.PKey):
@@ -97,8 +107,7 @@ class AsyncServ:
         command_future.set_result(command)
         log.info(f'exec_request_pre')
                 
-    async def start_con(self, conid: int, nsock: socket.socket):
-        ctx_conid.set(conid)
+    async def start_con(self, nsock: socket.socket):
         set_nodelay(nsock)
         with paramiko.Transport(nsock) as t:
             protocol_negotiation_future = loop().create_future()
