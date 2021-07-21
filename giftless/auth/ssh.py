@@ -1,33 +1,20 @@
+from __future__ import annotations
 import abc
 import asyncio
 import asyncio.subprocess
 import contextlib
-import contextvars
-import collections
 import collections.abc
-import dataclasses
 import functools
+import giftless.auth.ssh_util as util
 import io
 import logging
-from typing_extensions import runtime
 import paramiko
+import paramiko.common
 import paramiko.pipe
 import select
 import socket
 import typing
 
-
-# grrrr only defined in module on linux
-try:
-    from socket import SOCK_CLOEXEC, SOCK_NONBLOCK
-except Exception:
-    SOCK_CLOEXEC = 0
-    SOCK_NONBLOCK = 0
-
-
-READ_BUF_SIZE = 1024
-
-T = typing.TypeVar('T')
 
 server_private_key = '''-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
@@ -40,72 +27,10 @@ LTAwAQIDBAUGBwgJCgsMDQ4P
 '''
 
 
-ctx_conid = contextvars.ContextVar('conid', default=None)
+READ_BUF_SIZE = 1024
 
 
-class CtxAdapter(logging.LoggerAdapter):
-    def process(self, msg, kwargs):
-        return f'''[conid={ctx_conid.get('root')}] {msg}''', kwargs
-
-
-log = CtxAdapter(logging.getLogger(__name__), extra={})
-
-Addr = collections.namedtuple('Addr', ['host', 'port'])
-
-@dataclasses.dataclass
-class Accept:
-    accept: typing.Optional[asyncio.Task]
-
-    def ensure(self, loop: asyncio.AbstractEventLoop, sock: socket.socket) -> asyncio.Task:
-        if self.accept is None:
-            self.accept = loop.create_task(loop.sock_accept(sock))
-        return self.accept
-    
-    def clear(self):
-        assert self.accept is not None
-        assert self.accept.done()
-        self.accept = None
-
-class Eof:
-    def __len__(self):
-        return 0
-
-
-@contextlib.contextmanager
-def with_ctx_conid(conid: int) -> typing.Iterator[None]:
-    token = ctx_conid.set(conid)
-    try:
-        yield
-    finally:
-        ctx_conid.reset(token)
-
-
-@contextlib.contextmanager
-def channel_ctx(t: paramiko.Transport, accept_timeout: typing.Optional[float]) -> typing.Iterator[paramiko.Channel]:
-    with t.accept(accept_timeout) or contextlib.nullcontext() as chan:
-        if chan is None:
-            raise RuntimeError('Channel Accept Timeout')
-        yield chan
-
-
-@contextlib.asynccontextmanager
-async def queue_get(b: asyncio.Queue) -> typing.AsyncIterator[typing.Union[bytes, Eof]]:
-    i = await b.get()
-    try:
-        assert isinstance(i, bytes) or isinstance(i, Eof)
-        yield i
-    finally:
-        b.task_done()
-
-
-@contextlib.contextmanager
-def with_inset_remove(s: set, a: Accept) -> typing.Iterator[typing.Optional[asyncio.Task]]:
-    assert a.accept is not None
-    try:
-        yield a.accept if a.accept in s else None
-    finally:
-        s.discard(a.accept)
-        a.clear()
+log = util.ConIdLogAdapter(logging.getLogger(__name__), extra={})
 
 
 @contextlib.asynccontextmanager
@@ -117,93 +42,8 @@ async def task_awaiter(a: typing.Iterable[asyncio.Task]):
             await i
 
 
-class ResurrectableTask:
-    task: asyncio.Task
-
-    def done(self) -> bool:
-        return self.task.done()
-
-    def ensure_done(self) -> 'ResurrectableTask':
-        if not self.done():
-            raise RuntimeError()
-        return self
-
-    @contextlib.contextmanager
-    def with_resurrect_check(self):
-        if not self.done():
-            raise RuntimeError()
-        try:
-            yield
-        finally:
-            if self.done():
-                raise RuntimeError()
-
-    @contextlib.contextmanager
-    def with_try_take(self: T, s: set['ResuT']) -> typing.Iterator[T]:
-        if self in s:
-            try:
-                yield self
-            finally:
-                s.remove(self)
-        else:
-            yield None
-
-    @contextlib.asynccontextmanager
-    async def awaiter(self) -> typing.AsyncIterator[None]:
-        try:
-            yield
-        finally:
-            await self
-
-
-class ResurrectableAccept(ResurrectableTask):
+class ResurrectableAccept(util.ResurrectableTask):
     pass
-
-
-ResuT = typing.TypeVar('ResuT', bound=ResurrectableTask)
-
-
-class Waiter(typing.Generic[ResuT]):
-    @dataclasses.dataclass
-    class Done:
-        tasks: set[asyncio.Task]
-        resus: set[ResurrectableTask]
-
-    tasks: set[asyncio.Task]
-    resus: set[ResuT]
-
-    def __init__(self):
-        self.tasks = set[asyncio.Task]()
-        self.resus = set[ResuT]()
-
-    @contextlib.contextmanager
-    def needing_resurrect(self) -> typing.Iterator[set[ResuT]]:
-        try:
-            nr = {x for x in self.resus if x.dead}
-            yield nr
-        finally:
-            if len(nr):
-                raise RuntimeError()
-
-    @contextlib.asynccontextmanager
-    async def wait(self) -> typing.AsyncIterator['Waiter.Done']:
-        resus_dict = {x.task: x for x in self.resus}
-        assert not any([x for x in resus_dict if x.done()])
-        wait = [x for x in self.tasks] + [x for x in self.resus]
-        done, pending = await asyncio.wait(wait, return_when=asyncio.FIRST_COMPLETED)
-        resus_done = set()
-        tasks_done = set()
-        for x in done:
-            if x in resus_dict:
-                resus_done.add(resus_dict[x].ensure_done())
-            else:
-                tasks_done.add(x)
-        yield Waiter.Done(tasks=tasks_done, resus=resus_done)
-
-@contextlib.contextmanager
-def resurrect_if_needed(a: ResurrectableTask) -> typing.Iterator[asyncio.Task]:
-    a.resurrect_if_needed()
-    yield a.task
 
 
 def pkey_from_str(s: str):
@@ -262,11 +102,10 @@ class AsyncServ:
 
     async def start_(self):
         conid: int = 0
-        #a: Accept = Accept(accept=None)
         wait: set[asyncio.Task] = set()
         log.info(f'Starting to accept connections')
         accept: ResurrectableAccept = None
-        waiter = Waiter[ResurrectableAccept]()
+        waiter = util.Waiter[ResurrectableAccept]()
         while True:
             with waiter.needing_resurrect() as nr:
                 with accept.with_try_take(nr) as a:
@@ -277,8 +116,8 @@ class AsyncServ:
                     async with task_awaiter(done.tasks):
                         with accept.with_try_take(done.resus) as a:
                             if a is not None:
-                                nsock, addr = a.result()
-                                with with_ctx_conid((conid := conid + 1)):
+                                nsock, addr = a.task.result()
+                                with util.ctx_conid((conid := conid + 1)):
                                     wait |= {loop().create_task(self.start_con(set_nodelay(nsock)))}
 
     async def cb_auth_publickey(self, username: str, key: paramiko.PKey) -> bool:
@@ -290,28 +129,28 @@ class AsyncServ:
         log.info(f'exec_request_pre')
         return True
 
-    async def _command_reader_stdout(self, proc: asyncio.subprocess.Process, b: asyncio.Queue):
+    async def _command_reader_stdout(self, proc: asyncio.subprocess.Process, b: asyncio.Queue[util.DataT]):
         sr: asyncio.StreamReader = proc.stdout
         while True:
             if len(data := await sr.read(READ_BUF_SIZE)):
                 b.put_nowait(data)
             else:
-                b.put_nowait(Eof())
+                b.put_nowait(util.Eof())
                 break
 
-    async def _command_reader_stderr(self, proc: asyncio.subprocess.Process, b: asyncio.Queue):
+    async def _command_reader_stderr(self, proc: asyncio.subprocess.Process, b: asyncio.Queue[util.DataT]):
         sr: asyncio.StreamReader = proc.stderr
         while True:
             if len(data := await sr.read(READ_BUF_SIZE)):
                 b.put_nowait(data)
             else:
-                b.put_nowait(Eof())
+                b.put_nowait(util.Eof())
                 break
 
-    async def _command_writer_stdin(self, proc: asyncio.subprocess.Process, b: asyncio.Queue):
+    async def _command_writer_stdin(self, proc: asyncio.subprocess.Process, b: asyncio.Queue[util.DataT]):
         sw: asyncio.StreamWriter = proc.stdin
         while True:
-            async with queue_get(b) as data:
+            async with util.queue_get(b) as data:
                 if len(data):
                     sw.write(data)
                     await sw.drain()
@@ -320,7 +159,7 @@ class AsyncServ:
                     await sw.wait_closed()
                     break
 
-    async def _channel_reader(self, crw: ChannelReadWaiter, chan: paramiko.Channel, b: asyncio.Queue):
+    async def _channel_reader(self, crw: ChannelReadWaiter, chan: paramiko.Channel, b: asyncio.Queue[util.DataT]):
         while True:
             await crw.wait_read_a()
             if chan.recv_stderr_ready():
@@ -329,13 +168,13 @@ class AsyncServ:
                 if len(data := chan.recv(READ_BUF_SIZE)):
                     b.put_nowait(data)
                 else:
-                    b.put_nowait(Eof())
+                    b.put_nowait(util.Eof())
                     break
 
-    async def _channel_writer_stdout(self, chan: paramiko.Channel, b: asyncio.Queue):
+    async def _channel_writer_stdout(self, chan: paramiko.Channel, b: asyncio.Queue[util.DataT]):
         async def writer_func():
             while True:
-                async with queue_get(b) as data:
+                async with util.queue_get(b) as data:
                     if len(data):
                         chan.sendall(data)
                     else:
@@ -364,12 +203,12 @@ class AsyncServ:
 
             await asyncio.sleep(0)
 
-            with channel_ctx(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
+            with util.ctx_channel(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
                 crw = ChannelReadWaiter(chan)
 
-                comOq, comEq, comIq = [asyncio.Queue() for x in range(3)]
+                comOq, comEq, comIq = [asyncio.Queue[util.DataT]() for x in range(3)]
 
-                proc = await asyncio.create_subprocess_exec(command, stdin=asyncio.PIPE, stdout=asyncio.PIPE, stderr=asyncio.PIPE)
+                proc = await asyncio.create_subprocess_exec(command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
 
                 rds = await asyncio.gather(
                     self._command_reader_stdout(proc, comOq),
@@ -388,12 +227,12 @@ class AsyncServ:
 class ParamikoServerCb(paramiko.ServerInterface, metaclass=abc.ABCMeta):
     con_have_chan_request: bool
     loop: asyncio.AbstractEventLoop
-    coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[bool]]
-    coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[bool]]
+    coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[bool, None, None]]
+    coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[bool, None, None]]
 
     def __init__(self, loop: asyncio.AbstractEventLoop,
-                 coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[bool]],
-                 coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[bool]]):
+                 coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[bool, None, None]],
+                 coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[bool, None, None]]):
 
         self.con_have_chan_request = False
         self.loop = loop
@@ -403,8 +242,8 @@ class ParamikoServerCb(paramiko.ServerInterface, metaclass=abc.ABCMeta):
     def check_channel_request(self, kind: str, chanid: int):
         try:
             if not self.con_have_chan_request and kind == "session":
-                return paramiko.OPEN_SUCCEEDED
-            return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+                return paramiko.common.OPEN_SUCCEEDED
+            return paramiko.common.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
         finally:
             self.con_have_chan_request = True
 
@@ -414,8 +253,8 @@ class ParamikoServerCb(paramiko.ServerInterface, metaclass=abc.ABCMeta):
     def check_auth_publickey(self, username: str, key: paramiko.PKey):
         with suppress_and_log():
             if asyncio.run_coroutine_threadsafe(self.coro_auth_publickey(username, key), loop=self.loop).result():
-                return paramiko.AUTH_SUCCESSFUL
-        return paramiko.AUTH_FAILED
+                return paramiko.common.AUTH_SUCCESSFUL
+        return paramiko.common.AUTH_FAILED
 
     def check_channel_exec_request(self, channel: paramiko.Channel, command: str):
         with suppress_and_log():
@@ -429,7 +268,7 @@ def suppress_and_log(exc_type: typing.Type[BaseException] = Exception):
     try:
         yield
     except exc_type as exc:
-        log.info(exc_info=exc)
+        log.info('', exc_info=exc)
 
 def loop():
     return asyncio.get_running_loop()
@@ -438,7 +277,7 @@ def loop():
 def set_nodelay(sock: socket.socket) -> socket.socket:
     """https://docs.python.org/3/library/asyncio-eventloop.html#:~:text=The%20socket%20option%20TCP_NODELAY%20is%20set%20by%20default
     FIXME: is this public API ? asyncio documentation hints on TCP_NODELAY being set by default"""
-    from asyncio.base_events import _set_nodelay
+    from asyncio.base_events import _set_nodelay # type: ignore
     _set_nodelay(sock) # FIXME: is this public API ?
     return sock
 
@@ -447,7 +286,7 @@ def sock_for_port_serv(port: int):
     for family, typ, proto, canonname, sockaddr in socket.getaddrinfo(None, port, family=socket.AF_INET6, type=socket.SOCK_STREAM, proto=0, flags=socket.AI_PASSIVE | socket.AI_V4MAPPED | socket.AI_ADDRCONFIG):
         with contextlib.suppress(Exception), \
                 contextlib.ExitStack() as es:
-            es.enter_context(contextlib.closing(s := socket.socket(family, typ | SOCK_NONBLOCK | SOCK_CLOEXEC, proto)))
+            es.enter_context(contextlib.closing(s := socket.socket(family, typ | util.SOCK_NONBLOCK | util.SOCK_CLOEXEC, proto)))
             s.bind(sockaddr)
             s.listen(100)
             es.pop_all()
