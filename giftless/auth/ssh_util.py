@@ -98,10 +98,10 @@ class ConIdLogAdapter(logging.LoggerAdapter):
 
 
 class ResurrectableTask:
-    task: typing.Optional[asyncio.Task]
+    task: asyncio.Task
 
     def __init__(self):
-        self.task = None
+        self.task = typing.cast(asyncio.Task, None)
 
     def done(self) -> bool:
         return self.task is None or self.task.done()
@@ -132,12 +132,13 @@ class ResurrectableTask:
             yield None
 
 
-class Waiter(typing.Generic[ResuT]):
-    @dataclasses.dataclass
-    class Done:
-        tasks: set[asyncio.Task]
-        resus: set[ResurrectableTask]
+@dataclasses.dataclass
+class Done(typing.Generic[ResuT]):
+    tasks: set[asyncio.Task]
+    resus: set[ResuT]
 
+
+class Waiter(typing.Generic[ResuT]):
     tasks: set[asyncio.Task]
     resus: set[ResuT]
 
@@ -155,9 +156,8 @@ class Waiter(typing.Generic[ResuT]):
                 raise RuntimeError()
 
     @contextlib.asynccontextmanager
-    async def wait(self) -> typing.AsyncIterator['Waiter.Done']:
+    async def wait(self) -> typing.AsyncIterator[Done[ResuT]]:
         resus_dict = {x.task: x for x in self.resus}
-        assert not any([x for x in resus_dict if x.done()])
         wait = [x for x in self.tasks] + [x.task for x in self.resus]
         done, pending = await asyncio.wait(wait, return_when=asyncio.FIRST_COMPLETED)
         resus_done = set()
@@ -167,7 +167,7 @@ class Waiter(typing.Generic[ResuT]):
                 resus_done.add(resus_dict[x].ensure_done())
             else:
                 tasks_done.add(x)
-        yield Waiter.Done(tasks=tasks_done, resus=resus_done)
+        yield Done[ResuT](tasks=tasks_done, resus=resus_done)
 
 
 def pkey_from_str(s: str):

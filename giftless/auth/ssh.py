@@ -102,7 +102,7 @@ class AsyncServ:
                     async with util.task_awaiter(done.tasks):
                         with accept.with_try_take(done.resus) as a:
                             if a is not None:
-                                nsock, addr = a.task.result()
+                                nsock, addr = await a.task
                                 with util.ctx_conid((conid := conid + 1)):
                                     wait |= {loop().create_task(self.start_con(set_nodelay(nsock)))}
 
@@ -213,12 +213,12 @@ class AsyncServ:
 class ParamikoServerCb(paramiko.ServerInterface, metaclass=abc.ABCMeta):
     con_have_chan_request: bool
     loop: asyncio.AbstractEventLoop
-    coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[bool, None, None]]
-    coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[bool, None, None]]
+    coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[typing.Any, typing.Any, bool]]
+    coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[typing.Any, typing.Any, bool]]
 
     def __init__(self, loop: asyncio.AbstractEventLoop,
-                 coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[bool, None, None]],
-                 coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[bool, None, None]]):
+                 coro_auth_publickey: typing.Callable[[str, paramiko.PKey], collections.abc.Coroutine[typing.Any, typing.Any, bool]],
+                 coro_exec_request_pre: typing.Callable[[paramiko.Channel, str], collections.abc.Coroutine[typing.Any, typing.Any, bool]]):
 
         self.con_have_chan_request = False
         self.loop = loop
