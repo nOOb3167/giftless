@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import contextvars
 import dataclasses
+import io
 import logging
 import paramiko
 import typing
@@ -31,6 +32,38 @@ class Eof:
 class Addr:
     host: str
     port: int
+
+
+@dataclasses.dataclass
+class ExcChain:
+    e: typing.Optional[Exception]
+
+    @contextlib.contextmanager        
+    def thrower(self):
+        yield self
+        if self.e is not None:
+            raise RuntimeError('Exception Chain') from self.e
+    
+    @contextlib.contextmanager
+    def chainer(self):
+        try:
+            yield
+        except Exception as e:
+            try:
+                raise e from self.e
+            except Exception as e_:
+                self.e = e_
+
+
+@contextlib.asynccontextmanager
+async def task_awaiter(a: typing.Iterable[asyncio.Task]):
+    try:
+        yield
+    finally:
+        with ExcChain(None).thrower() as ec:
+            for i in a:
+                with ec.chainer():
+                    await i
 
 
 @contextlib.asynccontextmanager
@@ -132,3 +165,8 @@ class Waiter(typing.Generic[ResuT]):
             else:
                 tasks_done.add(x)
         yield Waiter.Done(tasks=tasks_done, resus=resus_done)
+
+
+def pkey_from_str(s: str):
+    with io.StringIO(s) as f:
+        return paramiko.Ed25519Key(file_obj=f)

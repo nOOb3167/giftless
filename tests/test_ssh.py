@@ -24,6 +24,8 @@ import paramiko
 import paramiko.hostkeys
 import paramiko.pkey
 
+import giftless.auth.ssh_util as util
+
 # grrrr only defined in module on linux
 try:
     from socket import SOCK_CLOEXEC, SOCK_NONBLOCK

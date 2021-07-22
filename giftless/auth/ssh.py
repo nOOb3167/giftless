@@ -6,7 +6,6 @@ import contextlib
 import collections.abc
 import functools
 import giftless.auth.ssh_util as util
-import io
 import logging
 import paramiko
 import paramiko.common
@@ -33,22 +32,8 @@ READ_BUF_SIZE = 1024
 log = util.ConIdLogAdapter(logging.getLogger(__name__), extra={})
 
 
-@contextlib.asynccontextmanager
-async def task_awaiter(a: typing.Iterable[asyncio.Task]):
-    try:
-        yield
-    finally:
-        for i in a:
-            await i
-
-
 class ResurrectableAccept(util.ResurrectableTask):
     pass
-
-
-def pkey_from_str(s: str):
-    with io.StringIO(s) as f:
-        return paramiko.Ed25519Key(file_obj=f)
 
 
 class ChannelReadWaiter:
@@ -113,7 +98,7 @@ class AsyncServ:
                         with a.with_resurrect_check():
                             a.task = loop().create_task(loop().sock_accept(self.sock))
                 async with waiter.wait() as done:
-                    async with task_awaiter(done.tasks):
+                    async with util.task_awaiter(done.tasks):
                         with accept.with_try_take(done.resus) as a:
                             if a is not None:
                                 nsock, addr = a.task.result()
@@ -295,6 +280,6 @@ def sock_for_port_serv(port: int):
 
 
 def start_server(sock: socket.socket):
-    server_key: paramiko.Ed25519Key = pkey_from_str(server_private_key)
+    server_key: paramiko.Ed25519Key = util.pkey_from_str(server_private_key)
     serv = AsyncServ(sock, server_key)
     serv.run_until_complete()
