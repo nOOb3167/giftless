@@ -169,7 +169,7 @@ class ThreadedClnt1(ThreadedClnt):
                 csif.flush()
                 chanfile_write(csif, b'hello world 2')
                 csif.flush()
-                time.sleep(1)
+                time.sleep(0.2)
                 chanfile_write(csif, b'hello world 3')
                 csif.flush()
                 csif.close()

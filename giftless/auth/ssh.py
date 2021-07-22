@@ -160,18 +160,16 @@ class AsyncServ:
                     break
 
     async def _channel_writer_stdout(self, chan: paramiko.Channel, b: asyncio.Queue[util.DataT]):
-        async def writer_func():
-            while True:
-                async with util.queue_get(b) as data:
-                    if len(data):
-                        chan.sendall(data)
-                    else:
-                        chan.shutdown_write()
-                        break
-        def thr_func():
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(writer_func())
-        return asyncio.to_thread(thr_func)
+        def writer_func(data: util.DataT):
+            assert isinstance(data, bytes)
+            chan.sendall(data)
+        while True:
+            async with util.queue_get(b) as data:
+                if len(data):
+                    await asyncio.to_thread(writer_func, data)
+                else:
+                    chan.shutdown_write()
+                    break
 
     async def start_con(self, nsock: socket.socket):
         with paramiko.Transport(nsock) as t:
