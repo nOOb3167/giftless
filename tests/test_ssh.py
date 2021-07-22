@@ -189,9 +189,9 @@ class ThreadedClnt1(ThreadedClnt):
                     bio.write(data)
                     if not len(data):
                         return bio.getvalue()
-            subs = [executor.submit(x) for x in [exclog(wi), exclog(ro), exclog(re)]]
-            for fut in concurrent.futures.as_completed(subs):
-                logging.info(f'clnt result {fut.result()}')
+            nams = {executor.submit(exclog(x)): x.__name__ for x in [wi, ro, re]}
+            for fut in concurrent.futures.as_completed(nams):
+                logging.info(f'clnt result: {nams[fut]} | {fut.result()}')
 
 
 @contextlib.contextmanager

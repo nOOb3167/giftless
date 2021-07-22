@@ -119,8 +119,10 @@ class AsyncServ:
         sr: asyncio.StreamReader = proc.stdout
         while True:
             if len(data := await sr.read(READ_BUF_SIZE)):
+                log.info(f'sod {data}')
                 b.put_nowait(data)
             else:
+                log.info(f'sod {data}')
                 b.put_nowait(util.Eof())
                 break
 
@@ -169,7 +171,7 @@ class AsyncServ:
         def thr_func():
             loop = asyncio.new_event_loop()
             loop.run_until_complete(writer_func())
-        return await asyncio.to_thread(thr_func)
+        return asyncio.to_thread(thr_func)
 
     async def start_con(self, nsock: socket.socket):
         with paramiko.Transport(nsock) as t:
