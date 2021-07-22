@@ -33,7 +33,8 @@ log = util.ConIdLogAdapter(logging.getLogger(__name__), extra={})
 
 
 class ResurrectableAccept(util.ResurrectableTask):
-    pass
+    def __init__(self):
+        super().__init__()
 
 
 class ChannelReadWaiter:
@@ -87,10 +88,10 @@ class AsyncServ:
 
     async def start_(self):
         conid: int = 0
-        wait: set[asyncio.Task] = set()
+        wait = set[asyncio.Task]()
         log.info(f'Starting to accept connections')
-        accept: ResurrectableAccept = None
-        waiter = util.Waiter[ResurrectableAccept]()
+        accept = ResurrectableAccept()
+        waiter = util.Waiter[ResurrectableAccept](accept)
         while True:
             with waiter.needing_resurrect() as nr:
                 with accept.with_try_take(nr) as a:

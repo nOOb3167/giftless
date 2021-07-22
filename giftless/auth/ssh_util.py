@@ -98,10 +98,13 @@ class ConIdLogAdapter(logging.LoggerAdapter):
 
 
 class ResurrectableTask:
-    task: asyncio.Task
+    task: typing.Optional[asyncio.Task]
+
+    def __init__(self):
+        self.task = None
 
     def done(self) -> bool:
-        return self.task.done()
+        return self.task is None or self.task.done()
 
     def ensure_done(self) -> ResurrectableTask:
         if not self.done():
@@ -138,9 +141,9 @@ class Waiter(typing.Generic[ResuT]):
     tasks: set[asyncio.Task]
     resus: set[ResuT]
 
-    def __init__(self):
+    def __init__(self, *resus: ResuT):
         self.tasks = set[asyncio.Task]()
-        self.resus = set[ResuT]()
+        self.resus = {x for x in resus}
 
     @contextlib.contextmanager
     def needing_resurrect(self) -> typing.Iterator[set[ResuT]]:
