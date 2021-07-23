@@ -88,7 +88,6 @@ class AsyncServ:
 
     async def start_(self):
         conid: int = 0
-        wait = set[asyncio.Task]()
         log.info(f'Starting to accept connections')
         accept = ResurrectableAccept()
         waiter = util.Waiter[ResurrectableAccept](accept)
@@ -104,7 +103,7 @@ class AsyncServ:
                             if a is not None:
                                 nsock, addr = await a.task
                                 with util.ctx_conid((conid := conid + 1)):
-                                    wait |= {loop().create_task(self.start_con(set_nodelay(nsock)))}
+                                    waiter.add_task(loop().create_task(self.start_con(set_nodelay(nsock))))
 
     async def cb_auth_publickey(self, username: str, key: paramiko.PKey) -> bool:
         log.info(f'auth_publickey')
@@ -195,17 +194,16 @@ class AsyncServ:
                 comOq, comEq, comIq = [asyncio.Queue[util.DataT]() for x in range(3)]
 
                 proc = await asyncio.create_subprocess_exec(command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-
-                rds = await asyncio.gather(
-                    self._command_reader_stdout(proc, comOq),
-                    self._command_reader_stderr(proc, comEq),
-                    self._command_writer_stdin(proc, comIq),
-                    self._channel_reader(crw, chan, comIq),
-                    self._channel_writer_stdout(chan, comOq),
+                rds = [loop().create_task(self._command_reader_stdout(proc, comOq), name='_command_reader_stdout'),
+                    loop().create_task(self._command_reader_stderr(proc, comEq), name='_command_reader_stderr'),
+                    loop().create_task(self._command_writer_stdin(proc, comIq), name='_command_writer_stdin'),
+                    loop().create_task(self._channel_reader(crw, chan, comIq), name='_channel_reader'),
+                    loop().create_task(self._channel_writer_stdout(chan, comOq), name='_channel_writer_stdout'),
                     #self._channel_writer_stderr(chan, comEq),
-                    proc.wait())
-
-                logging.info(f'rds {rds}')
+                    loop().create_task(proc.wait(), name='proc.wait')]
+                async for rd in util.as_completed(rds):
+                    res = await rd
+                    log.info(f'rds finished | {rd.get_name()} | {res}')
 
             return
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import asyncio.futures
 import contextlib
 import contextvars
 import dataclasses
@@ -53,6 +54,15 @@ class ExcChain:
                 raise e from self.e
             except Exception as e_:
                 self.e = e_
+
+
+async def as_completed(fs):
+    assert all([asyncio.futures.isfuture(x) for x in fs])
+    pending = fs
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for d in done:
+            yield d
 
 
 @contextlib.asynccontextmanager
@@ -145,6 +155,9 @@ class Waiter(typing.Generic[ResuT]):
     def __init__(self, *resus: ResuT):
         self.tasks = set[asyncio.Task]()
         self.resus = {x for x in resus}
+
+    def add_task(self, task: asyncio.Task):
+        self.tasks.add(task)
 
     @contextlib.contextmanager
     def needing_resurrect(self) -> typing.Iterator[set[ResuT]]:
