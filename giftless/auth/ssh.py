@@ -61,18 +61,6 @@ class ChannelReadWaiter:
         await loop().sock_sendall(self._wsock, b"*")
 
 
-class FutureEvent:
-    loop: asyncio.AbstractEventLoop
-    future: asyncio.Future
-
-    def __init__(self, loop: asyncio.AbstractEventLoop, future: asyncio.Future):
-        self.loop = loop
-        self.future = future
-    
-    def set(self):
-        self.loop.call_soon_threadsafe(self.future.set_result, None)
-
-
 class AsyncServ:
     CHANNEL_ACCEPT_TIMEOUT = 120
     loop: asyncio.AbstractEventLoop
@@ -181,7 +169,7 @@ class AsyncServ:
                 coro_auth_publickey=self.cb_auth_publickey,
                 coro_exec_request_pre=functools.partial(self.cb_exec_request_pre, command_future))
             t.add_server_key(key=self.server_key)
-            t.start_server(event=FutureEvent(loop(), protocol_negotiation_future), server=server)
+            t.start_server(event=util.FutureEvent(loop(), protocol_negotiation_future), server=server)
             log.info(f'waiting for protocol negotiation')
             await protocol_negotiation_future
             log.info(f'after_negotiation')

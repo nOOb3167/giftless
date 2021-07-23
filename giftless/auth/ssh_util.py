@@ -7,12 +7,13 @@ import dataclasses
 import io
 import logging
 import paramiko
+import socket
+import sys
 import typing
 
-# grrrr module only defines these flags on linux
-try:
+if sys.platform == 'linux':
     from socket import SOCK_CLOEXEC, SOCK_NONBLOCK
-except Exception:
+else:
     SOCK_CLOEXEC = 0
     SOCK_NONBLOCK = 0
 
@@ -27,6 +28,18 @@ ctx_conid_var: contextvars.ContextVar[int] = contextvars.ContextVar('conid', def
 class Eof:
     def __len__(self):
         return 0
+
+
+class FutureEvent:
+    loop: asyncio.AbstractEventLoop
+    future: asyncio.Future
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, future: asyncio.Future):
+        self.loop = loop
+        self.future = future
+    
+    def set(self):
+        self.loop.call_soon_threadsafe(self.future.set_result, None)
 
 
 @dataclasses.dataclass
@@ -54,6 +67,18 @@ class ExcChain:
                 raise e from self.e
             except Exception as e_:
                 self.e = e_
+
+
+def sock_for_port_serv(port: int):
+    for family, typ, proto, canonname, sockaddr in socket.getaddrinfo(None, port, family=socket.AF_INET6, type=socket.SOCK_STREAM, proto=0, flags=socket.AI_PASSIVE | socket.AI_V4MAPPED | socket.AI_ADDRCONFIG):
+        with contextlib.suppress(Exception), \
+                contextlib.ExitStack() as es:
+            es.enter_context(contextlib.closing(s := socket.socket(family, typ | SOCK_NONBLOCK | SOCK_CLOEXEC, proto)))
+            s.bind(sockaddr)
+            s.listen(100)
+            es.pop_all()
+            return s
+    raise RuntimeError(f'Listening on port {port}')
 
 
 async def as_completed(fs):
