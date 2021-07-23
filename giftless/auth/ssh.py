@@ -56,6 +56,7 @@ class ChannelReadWaiter:
         assert len(rl) and rl[0] == self.fileno
 
     async def wait_read_a(self):
+        # FIXME: maybe need to acquire chan.in_buffer.lock
         await loop().sock_recv(self._rsock, 1)
         await loop().sock_sendall(self._wsock, b"*")
 
@@ -138,6 +139,7 @@ class AsyncServ:
         sw: asyncio.StreamWriter = proc.stdin
         while True:
             async with util.queue_get(b) as data:
+                log.info(f'sid {data}')
                 if len(data):
                     sw.write(data)
                     await sw.drain()
@@ -149,14 +151,14 @@ class AsyncServ:
     async def _channel_reader(self, crw: ChannelReadWaiter, chan: paramiko.Channel, b: asyncio.Queue[util.DataT]):
         while True:
             await crw.wait_read_a()
-            if chan.recv_stderr_ready():
-                raise RuntimeError('Channel sent input data over stderr? (SSH_EXTENDED_DATA_STDERR)')
-            if chan.recv_ready():
-                if len(data := chan.recv(READ_BUF_SIZE)):
-                    b.put_nowait(data)
-                else:
-                    b.put_nowait(util.Eof())
-                    break
+            assert not chan.recv_stderr_ready(), 'Channel sent input data over stderr? (SSH_EXTENDED_DATA_STDERR)'
+            data = chan.recv(READ_BUF_SIZE)
+            log.info(f'cr {data}')
+            if len(data):
+                b.put_nowait(data)
+            else:
+                b.put_nowait(util.Eof())
+                break
 
     async def _channel_writer_stdout(self, chan: paramiko.Channel, b: asyncio.Queue[util.DataT]):
         def writer_func(data: util.DataT):

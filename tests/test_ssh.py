@@ -437,7 +437,7 @@ def test_ssh_2(caplog):
     assert 0
 
 
-@pytest.mark.timeout(5)
+@pytest.mark.timeout(7)
 def test_ssh_3(caplog):
     caplog.set_level(logging.INFO)
     addr = Addr(host="localhost", port=5001)
