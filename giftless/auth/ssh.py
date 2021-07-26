@@ -94,11 +94,48 @@ class AsyncServ:
                                 with util.ctx_conid((conid := conid + 1)):
                                     waiter.add_task(loop().create_task(self.start_con(set_nodelay(nsock))))
 
-    async def cb_auth_publickey(self, username: str, key: paramiko.PKey) -> bool:
+    async def start_con(self, nsock: socket.socket):
+        with paramiko.Transport(nsock) as t:
+            protocol_negotiation_future = loop().create_future()
+            command_future = loop().create_future()
+            server = ParamikoServerCb(
+                loop=loop(),
+                coro_auth_publickey=self._cb_auth_publickey,
+                coro_exec_request_pre=functools.partial(self._cb_exec_request_pre, command_future))
+            t.add_server_key(key=self.server_key)
+            t.start_server(event=util.FutureEvent(loop(), protocol_negotiation_future), server=server)
+            log.info(f'waiting for protocol negotiation')
+            await protocol_negotiation_future
+            log.info(f'after_negotiation')
+            command = await command_future
+            log.info(f'command {command}')
+
+            await asyncio.sleep(0)
+
+            with util.ctx_channel(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
+                crw = ChannelReadWaiter(chan)
+
+                comOq, comEq, comIq = [asyncio.Queue[util.DataT]() for x in range(3)]
+
+                proc = await asyncio.create_subprocess_exec(command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                rds = [loop().create_task(self._command_reader_stdout(proc, comOq), name='_command_reader_stdout'),
+                    loop().create_task(self._command_reader_stderr(proc, comEq), name='_command_reader_stderr'),
+                    loop().create_task(self._command_writer_stdin(proc, comIq), name='_command_writer_stdin'),
+                    loop().create_task(self._channel_reader(crw, chan, comIq), name='_channel_reader'),
+                    loop().create_task(self._channel_writer_stdout(chan, comOq), name='_channel_writer_stdout'),
+                    #self._channel_writer_stderr(chan, comEq),
+                    loop().create_task(proc.wait(), name='proc.wait')]
+                async for rd in util.as_completed(rds):
+                    res = await rd
+                    log.info(f'rds finished | {rd.get_name()} | {res}')
+
+            return
+
+    async def _cb_auth_publickey(self, username: str, key: paramiko.PKey) -> bool:
         log.info(f'auth_publickey')
         return True
 
-    async def cb_exec_request_pre(self, command_future: asyncio.Future, channel: paramiko.Channel, command: str) -> bool:
+    async def _cb_exec_request_pre(self, command_future: asyncio.Future, channel: paramiko.Channel, command: str) -> bool:
         command_future.set_result(command)
         log.info(f'exec_request_pre')
         return True
@@ -159,43 +196,6 @@ class AsyncServ:
                 else:
                     chan.shutdown_write()
                     break
-
-    async def start_con(self, nsock: socket.socket):
-        with paramiko.Transport(nsock) as t:
-            protocol_negotiation_future = loop().create_future()
-            command_future = loop().create_future()
-            server = ParamikoServerCb(
-                loop=loop(),
-                coro_auth_publickey=self.cb_auth_publickey,
-                coro_exec_request_pre=functools.partial(self.cb_exec_request_pre, command_future))
-            t.add_server_key(key=self.server_key)
-            t.start_server(event=util.FutureEvent(loop(), protocol_negotiation_future), server=server)
-            log.info(f'waiting for protocol negotiation')
-            await protocol_negotiation_future
-            log.info(f'after_negotiation')
-            command = await command_future
-            log.info(f'command {command}')
-
-            await asyncio.sleep(0)
-
-            with util.ctx_channel(t, self.CHANNEL_ACCEPT_TIMEOUT) as chan:
-                crw = ChannelReadWaiter(chan)
-
-                comOq, comEq, comIq = [asyncio.Queue[util.DataT]() for x in range(3)]
-
-                proc = await asyncio.create_subprocess_exec(command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                rds = [loop().create_task(self._command_reader_stdout(proc, comOq), name='_command_reader_stdout'),
-                    loop().create_task(self._command_reader_stderr(proc, comEq), name='_command_reader_stderr'),
-                    loop().create_task(self._command_writer_stdin(proc, comIq), name='_command_writer_stdin'),
-                    loop().create_task(self._channel_reader(crw, chan, comIq), name='_channel_reader'),
-                    loop().create_task(self._channel_writer_stdout(chan, comOq), name='_channel_writer_stdout'),
-                    #self._channel_writer_stderr(chan, comEq),
-                    loop().create_task(proc.wait(), name='proc.wait')]
-                async for rd in util.as_completed(rds):
-                    res = await rd
-                    log.info(f'rds finished | {rd.get_name()} | {res}')
-
-            return
 
 
 class ParamikoServerCb(paramiko.ServerInterface, metaclass=abc.ABCMeta):
