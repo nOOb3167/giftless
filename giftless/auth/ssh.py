@@ -79,7 +79,7 @@ class AsyncServ:
         conid: int = 0
         log.info(f'Starting to accept connections')
         accept = ResurrectableAccept()
-        waiter = util.Waiter[ResurrectableAccept](accept)
+        waiter = util.ResurrectableWaiter[ResurrectableAccept](accept)
         while True:
             with waiter.needing_resurrect() as nr:
                 with accept.with_try_take(nr) as a:

@@ -72,7 +72,7 @@ class ExcChain:
     def _cut_bottom_tb(self, e: Exception):
         if e.__traceback__ is not None:
             e.__traceback__ = e.__traceback__.tb_next
-            
+
     def _set_cause_warn(self, e: Exception, to: typing.Optional[Exception]):
         if e.__cause__ is not None:
             logging.warning(f'Overwriting __cause__ attribute of exception {e}')
@@ -182,7 +182,7 @@ class Done(typing.Generic[ResuT]):
     resus: set[ResuT]
 
 
-class Waiter(typing.Generic[ResuT]):
+class ResurrectableWaiter(typing.Generic[ResuT]):
     tasks: set[asyncio.Task]
     resus: set[ResuT]
 
@@ -215,6 +215,21 @@ class Waiter(typing.Generic[ResuT]):
             else:
                 tasks_done.add(x)
         yield Done[ResuT](tasks=tasks_done, resus=resus_done)
+
+
+class Waiter():
+    tasks: set[asyncio.Task]
+
+    def __init__(self):
+        self.tasks = set[asyncio.Task]()
+
+    def add_task(self, task: asyncio.Task):
+        self.tasks.add(task)
+
+    @contextlib.asynccontextmanager
+    async def wait(self) -> typing.AsyncIterator[set[asyncio.Task]]:
+        done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
+        yield done
 
 
 def pkey_from_str(s: str):
