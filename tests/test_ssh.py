@@ -84,6 +84,27 @@ def chanfile_write(chanfile, b: bytes):
         chanfile.write(b)
 
 
+def test_chain(caplog):
+    caplog.set_level(logging.INFO)
+    async def b(x):
+        raise RuntimeError(x)
+    async def a():
+        t = [get_running_loop().create_task(b(x)) for x in range(3)]
+        with util.ExcChain(None).thrower() as ec:
+            for a in t:
+                with ec.chainer():
+                    await a
+    loop = new_event_loop()
+    loop.run_until_complete(a())
+
+
+def test_chain_2(caplog):
+    caplog.set_level(logging.INFO)
+    with util.ExcChain(None).thrower() as ec:
+        with ec.chainer():
+            raise RuntimeError()
+
+
 class ThreadedClnt(threading.Thread, metaclass=abc.ABCMeta):
     JOIN_TIMEOUT: float = 3
 

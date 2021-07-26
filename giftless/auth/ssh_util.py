@@ -54,20 +54,29 @@ class ExcChain:
 
     @contextlib.contextmanager        
     def thrower(self):
-        yield self
-        if self.e is not None:
-            raise RuntimeError('Exception Chain') from self.e
+        try:
+            yield self
+        finally:
+            if self.e is not None:
+                raise RuntimeError('Exception Chain') from self.e
     
     @contextlib.contextmanager
     def chainer(self):
         try:
             yield
         except Exception as e:
-            try:
-                raise e from self.e
-            except Exception as e_:
-                self.e = e_
+            self._cut_bottom_tb(e)
+            self._set_cause_warn(e, self.e)
+            self.e = e
 
+    def _cut_bottom_tb(self, e: Exception):
+        if e.__traceback__ is not None:
+            e.__traceback__ = e.__traceback__.tb_next
+            
+    def _set_cause_warn(self, e: Exception, to: typing.Optional[Exception]):
+        if e.__cause__ is not None:
+            logging.warning(f'Overwriting __cause__ attribute of exception {e}')
+        e.__cause__ = to
 
 def sock_for_port_serv(port: int):
     for family, typ, proto, canonname, sockaddr in socket.getaddrinfo(None, port, family=socket.AF_INET6, type=socket.SOCK_STREAM, proto=0, flags=socket.AI_PASSIVE | socket.AI_V4MAPPED | socket.AI_ADDRCONFIG):
