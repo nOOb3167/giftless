@@ -85,14 +85,17 @@ class AsyncServ:
                 with accept.with_try_take(nr) as a:
                     if a is not None:
                         with a.with_resurrect_check():
-                            a.task = loop().create_task(loop().sock_accept(self.sock))
+                            async def _task_sock_accept(): return await loop().sock_accept(self.sock)
+                            a.task = loop().create_task(_task_sock_accept())
                 async with waiter.wait() as done:
                     async with util.task_awaiter(done.tasks):
                         with accept.with_try_take(done.resus) as a:
                             if a is not None:
                                 nsock, addr = await a.task
                                 with util.ctx_conid((conid := conid + 1)):
-                                    waiter.add_task(loop().create_task(self.start_con(set_nodelay(nsock))))
+                                    async def _task_start_con(): return await self.start_con(set_nodelay(nsock))
+                                    waiter.add_task(loop().create_task(_task_start_con()))
+                                    pass
 
     async def start_con(self, nsock: socket.socket):
         with paramiko.Transport(nsock) as t:
@@ -118,16 +121,20 @@ class AsyncServ:
                 comOq, comEq, comIq = [asyncio.Queue[util.DataT]() for x in range(3)]
 
                 proc = await asyncio.create_subprocess_exec(command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                rds = [loop().create_task(self._command_reader_stdout(proc, comOq), name='_command_reader_stdout'),
-                    loop().create_task(self._command_reader_stderr(proc, comEq), name='_command_reader_stderr'),
-                    loop().create_task(self._command_writer_stdin(proc, comIq), name='_command_writer_stdin'),
-                    loop().create_task(self._channel_reader(crw, chan, comIq), name='_channel_reader'),
-                    loop().create_task(self._channel_writer_stdout(chan, comOq), name='_channel_writer_stdout'),
-                    #self._channel_writer_stderr(chan, comEq),
-                    loop().create_task(proc.wait(), name='proc.wait')]
-                async for rd in util.as_completed(rds):
-                    res = await rd
-                    log.info(f'rds finished | {rd.get_name()} | {res}')
+
+                waiter = util.Waiter()
+
+                async with waiter.canceller():
+                    await waiter.add_task_new(self._command_reader_stdout(proc, comOq), name='_command_reader_stdout')
+                    await waiter.add_task_new(self._command_reader_stderr(proc, comEq), name='_command_reader_stderr')
+                    await waiter.add_task_new(self._command_writer_stdin(proc, comIq), name='_command_writer_stdin')
+                    await waiter.add_task_new(self._channel_reader(crw, chan, comIq), name='_channel_reader')
+                    await waiter.add_task_new(self._channel_writer_stdout(chan, comOq), name='_channel_writer_stdout')
+                    await waiter.add_task_new(proc.wait(), name='proc.wait')
+
+                    async for rd in util.as_completed(waiter.tasks):
+                        await rd
+                        log.info(f'rds finished: {rd.get_name()}')
 
             return
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
+from asyncio.events import get_running_loop
 import asyncio.futures
+import collections.abc
 import contextlib
 import contextvars
 import dataclasses
@@ -9,6 +11,7 @@ import logging
 import paramiko
 import socket
 import sys
+import traceback
 import typing
 
 if sys.platform == 'linux':
@@ -49,7 +52,7 @@ class Addr:
 
 
 @dataclasses.dataclass
-class ExcChain:
+class ExcChainCause:
     e: typing.Optional[Exception]
 
     @contextlib.contextmanager        
@@ -58,7 +61,9 @@ class ExcChain:
             yield self
         finally:
             if self.e is not None:
-                raise RuntimeError('Exception Chain') from self.e
+                a = RuntimeError('Exception Chain')
+                a.__context__ = self.e
+                raise a
     
     @contextlib.contextmanager
     def chainer(self):
@@ -75,8 +80,42 @@ class ExcChain:
 
     def _set_cause_warn(self, e: Exception, to: typing.Optional[Exception]):
         if e.__cause__ is not None:
-            logging.warning(f'Overwriting __cause__ attribute of exception {e}')
+            logging.warning(f'Overwriting __cause__ attribute of exception: {type(e)}: {e}')
         e.__cause__ = to
+
+
+class ExcChain:
+    e: list[Exception]
+
+    def __init__(self):
+        self.e = []
+
+    @contextlib.contextmanager        
+    def thrower(self):
+        try:
+            yield self
+        finally:
+            if len(self.e):
+                all = []
+                for i, v in enumerate(self.e):
+                    # self._cut_bottom_tb(e)
+                        sl = traceback.format_exception(type(v), v, v.__traceback__)
+                        sl_ = (y for x in sl for y in x.split('\n'))
+                        all += [f'\ne[{i}] {x}' for x in sl_]
+                a = RuntimeError(''.join(x for x in all))
+                raise a
+    
+    @contextlib.contextmanager
+    def chainer(self):
+        try:
+            yield
+        except Exception as e:
+            self.e.append(e)
+
+    def _cut_bottom_tb(self, e: Exception):
+        if e.__traceback__ is not None:
+            e.__traceback__ = e.__traceback__.tb_next
+
 
 def sock_for_port_serv(port: int):
     for family, typ, proto, canonname, sockaddr in socket.getaddrinfo(None, port, family=socket.AF_INET6, type=socket.SOCK_STREAM, proto=0, flags=socket.AI_PASSIVE | socket.AI_V4MAPPED | socket.AI_ADDRCONFIG):
@@ -104,7 +143,7 @@ async def task_awaiter(a: typing.Iterable[asyncio.Task]):
     try:
         yield
     finally:
-        with ExcChain(None).thrower() as ec:
+        with ExcChain().thrower() as ec:
             for i in a:
                 with ec.chainer():
                     await i
@@ -223,13 +262,25 @@ class Waiter():
     def __init__(self):
         self.tasks = set[asyncio.Task]()
 
-    def add_task(self, task: asyncio.Task):
-        self.tasks.add(task)
+    async def add_task_new(self, coro: collections.abc.Awaitable[T], **opt_name: str) -> asyncio.Task[T]:
+        t = get_running_loop().create_task(coro, **opt_name)
+        self.tasks.add(t)
+        return t
 
     @contextlib.asynccontextmanager
     async def wait(self) -> typing.AsyncIterator[set[asyncio.Task]]:
         done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
         yield done
+    
+    @contextlib.asynccontextmanager
+    async def canceller(self):
+        try:
+            yield
+        finally:
+            gf = asyncio.gather(*self.tasks, return_exceptions=True)
+            gf.cancel()
+            async with task_awaiter((tasks := await gf)):
+                pass
 
 
 def pkey_from_str(s: str):

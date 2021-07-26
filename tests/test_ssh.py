@@ -90,7 +90,7 @@ def test_chain(caplog):
         raise RuntimeError(x)
     async def a():
         t = [get_running_loop().create_task(b(x)) for x in range(3)]
-        with util.ExcChain(None).thrower() as ec:
+        with util.ExcChain().thrower() as ec:
             for a in t:
                 with ec.chainer():
                     await a
@@ -100,7 +100,7 @@ def test_chain(caplog):
 
 def test_chain_2(caplog):
     caplog.set_level(logging.INFO)
-    with util.ExcChain(None).thrower() as ec:
+    with util.ExcChain().thrower() as ec:
         with ec.chainer():
             raise RuntimeError()
 
