@@ -82,6 +82,10 @@ def exc_get_caller_frame():
     return s[3].frame
 
 
+def exc_get_current():
+    return sys.exc_info()[1]
+
+
 def exc_augment_frame():
     if (e := sys.exc_info()[1]) is not None:
         caller: inspect.FrameInfo = inspect.stack()[1]
@@ -125,6 +129,17 @@ def exc_format_multi(e: typing.Iterable[BaseException]):
     return RuntimeError(''.join(x for x in all))
 
 
+def exc_filter_context(e_: BaseException, f: BaseException):
+    def r(e: BaseException):
+        if e.__context__ == f:
+            e.__context__ = None
+        if e.__cause__ == f:
+            e.__cause__ = None
+        if e.__context__:
+            r(e.__context__)
+        if e.__cause__:
+            r(e.__cause__)
+    r(e_)
 
 class ExcChain:
     e: list[Exception]

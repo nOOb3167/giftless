@@ -355,11 +355,14 @@ def test_chain_9(caplog):
             self.e = []
             self.r = None
             self.fi = util.exc_get_caller_frame()
+            self.ei = util.exc_get_current()
         @contextlib.contextmanager
         def suppress(self):
             try:
                 yield
             except Exception as e:
+                if self.ei:
+                    util.exc_filter_context(e, self.ei)
                 self.e.append(e)
         @contextlib.contextmanager
         def format(self):
@@ -382,15 +385,11 @@ def test_chain_9(caplog):
     def cm(tasks):
         try:
             yield
-        except Exception as e:
-            _e = e
-        else:
-            _e = None
-        if (f := doawait(tasks)):
-            raise f from _e
+        finally:
+            if (f := doawait(tasks)):
+                raise f
     def task0():
-        rr = RuntimeError('_r')
-        raise rr from (rr.__context__ if rr.__context__ else rr.__cause__)
+        raise RuntimeError('_r')
     def ba():
         raise RuntimeError('ba')
     def b():
