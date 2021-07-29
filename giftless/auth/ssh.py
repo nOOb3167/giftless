@@ -131,7 +131,7 @@ class AsyncServ:
                     await waiter.add_task_new(self._channel_reader(crw, chan, comIq), name='_channel_reader')
                     await waiter.add_task_new(self._channel_writer_stdout(chan, comOq), name='_channel_writer_stdout')
                     await waiter.add_task_new(proc.wait(), name='proc.wait')
-
+                    
                     async for rd in util.as_completed(waiter.tasks):
                         await rd
                         log.info(f'rds finished: {rd.get_name()}')
@@ -149,6 +149,7 @@ class AsyncServ:
 
     async def _command_reader_stdout(self, proc: asyncio.subprocess.Process, b: asyncio.Queue[util.DataT]):
         sr: asyncio.StreamReader = proc.stdout
+        raise RuntimeError('fdfd')
         while True:
             if len(data := await sr.read(READ_BUF_SIZE)):
                 log.info(f'sod {data}')

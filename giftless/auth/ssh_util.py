@@ -1,13 +1,14 @@
 from __future__ import annotations
 import asyncio
-from asyncio.events import get_running_loop
 import asyncio.futures
 import collections.abc
 import contextlib
 import contextvars
 import dataclasses
+import inspect
 import io
 import logging
+import types
 import paramiko
 import socket
 import sys
@@ -70,18 +71,59 @@ class ExcChainCause:
         try:
             yield
         except Exception as e:
-            self._cut_bottom_tb(e)
-            self._set_cause_warn(e, self.e)
+            exc_cut_bottom_tb(e)
+            exc_set_cause_warn(e, self.e)
             self.e = e
 
-    def _cut_bottom_tb(self, e: Exception):
-        if e.__traceback__ is not None:
-            e.__traceback__ = e.__traceback__.tb_next
 
-    def _set_cause_warn(self, e: Exception, to: typing.Optional[Exception]):
-        if e.__cause__ is not None:
-            logging.warning(f'Overwriting __cause__ attribute of exception: {type(e)}: {e}')
-        e.__cause__ = to
+def exc_get_caller_frame():
+    s = inspect.stack()
+    assert len(s) >= 3
+    return s[3].frame
+
+
+def exc_augment_frame():
+    if (e := sys.exc_info()[1]) is not None:
+        caller: inspect.FrameInfo = inspect.stack()[1]
+        tt = types.TracebackType(e.__traceback__, caller.frame, caller.frame.f_lasti, caller.frame.f_lineno)
+        e.with_traceback(tt)
+
+
+def exc_cut_top_tb_n(e: Exception, n: int):
+    tb = e.__traceback__
+    l = list[types.TracebackType]()
+    while tb is not None:
+        l.append(tb)
+        tb = tb.tb_next
+    tbn = l[n]
+    tbn.tb_next = None
+
+
+def exc_cut_bottom_tb(e: Exception):
+    if e.__traceback__ is not None:
+        e.__traceback__ = e.__traceback__.tb_next
+
+
+def exc_add_bottom_tb(e: Exception, frame: types.FrameType):
+    tb = types.TracebackType(e.__traceback__, frame, frame.f_lasti, frame.f_lineno)
+    e.with_traceback(tb)
+
+
+def exc_set_cause_warn(e: Exception, to: typing.Optional[Exception]):
+    if e.__cause__ is not None:
+        logging.warning(f'Overwriting __cause__ attribute of exception: {type(e)}: {e}')
+    e.__cause__ = to
+
+
+def exc_format_multi(e: typing.Iterable[BaseException]):
+    all = list[str]()
+    for i, v in enumerate(e):
+            # _cut_bottom_tb(e)
+            sl = traceback.format_exception(type(v), v, v.__traceback__)
+            sl_ = (y for x in sl for y in x.split('\n'))
+            all += [f'\ne[{i}] {x}' for x in sl_]
+    return RuntimeError(''.join(x for x in all))
+
 
 
 class ExcChain:
@@ -96,14 +138,7 @@ class ExcChain:
             yield self
         finally:
             if len(self.e):
-                all = []
-                for i, v in enumerate(self.e):
-                    # self._cut_bottom_tb(e)
-                        sl = traceback.format_exception(type(v), v, v.__traceback__)
-                        sl_ = (y for x in sl for y in x.split('\n'))
-                        all += [f'\ne[{i}] {x}' for x in sl_]
-                a = RuntimeError(''.join(x for x in all))
-                raise a
+                raise exc_format_multi(self.e)
     
     @contextlib.contextmanager
     def chainer(self):
@@ -263,7 +298,7 @@ class Waiter():
         self.tasks = set[asyncio.Task]()
 
     async def add_task_new(self, coro: collections.abc.Awaitable[T], **opt_name: str) -> asyncio.Task[T]:
-        t = get_running_loop().create_task(coro, **opt_name)
+        t = asyncio.get_running_loop().create_task(coro, **opt_name)
         self.tasks.add(t)
         return t
 
@@ -274,13 +309,26 @@ class Waiter():
     
     @contextlib.asynccontextmanager
     async def canceller(self):
+        import inspect
         try:
             yield
         finally:
-            gf = asyncio.gather(*self.tasks, return_exceptions=True)
-            gf.cancel()
-            async with task_awaiter((tasks := await gf)):
-                pass
+            excs = []
+            for t in self.tasks:
+                t.cancel()
+            ff = inspect.currentframe()
+            for t in self.tasks:
+                try:
+                    await t
+                except asyncio.CancelledError as e:
+                    pass # await of cancelled task completed normally
+                except Exception as e:
+                    excs.append(e)
+                else:
+                    raise RuntimeError('unexpected')
+            if len(excs):
+                efm = exc_format_multi(excs)
+                raise efm
 
 
 def pkey_from_str(s: str):
