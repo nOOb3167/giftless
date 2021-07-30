@@ -115,7 +115,7 @@ def test_chain_2(caplog):
 def test_chain_9(caplog):
     caplog.set_level(logging.INFO)
     def doawait(tasks):
-        eah = util.ExcActuallyHappenAbove(frame_kind=util.FrameKind.CALLER)
+        eah = util.ExcMeta(frame_kind=util.FrameKind.CALLER)
         with eah.format():
             for task in tasks:
                 with eah.suppress():

@@ -88,7 +88,7 @@ class AsyncServ:
                             async def _task_sock_accept(): return await loop().sock_accept(self.sock)
                             a.task = loop().create_task(_task_sock_accept())
                 async with waiter.wait() as done:
-                    async with util.task_awaiter(done.tasks):
+                    async with util.multi_awaiter(done.tasks, excm=util.ExcMeta()):
                         with accept.with_try_take(done.resus) as a:
                             if a is not None:
                                 nsock, addr = await a.task

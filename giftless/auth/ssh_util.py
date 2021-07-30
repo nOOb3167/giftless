@@ -113,8 +113,8 @@ def exc_cut_bottom_tb(e: BaseException):
         e.__traceback__ = e.__traceback__.tb_next
 
 
-def exc_add_bottom_tb(e: BaseException, frame: types.FrameType):
-    tb = types.TracebackType(e.__traceback__, frame, frame.f_lasti, frame.f_lineno)
+def exc_add_bottom_tb(e: BaseException, fi: tuple[types.FrameType, int, int]):
+    tb = types.TracebackType(e.__traceback__, tb_frame=fi[0], tb_lasti=fi[1], tb_lineno=fi[2])
     e.with_traceback(tb)
 
 
@@ -172,16 +172,16 @@ class ExcChain:
             e.__traceback__ = e.__traceback__.tb_next
 
 
-class ExcActuallyHappenAbove:
+class ExcMeta:
     e: list[BaseException]
     r: typing.Optional[RuntimeError]
-    fi: types.FrameType
+    fi: tuple[types.FrameType, int, int]
     ei: typing.Optional[BaseException]
 
-    def __init__(self, frame_kind):
+    def __init__(self, frame_kind = FrameKind.THIS):
         self.e = []
         self.r = None
-        self.fi = exc_get_frame(frame_kind)
+        self.fi = ((frame := exc_get_frame(frame_kind)), frame.f_lasti, frame.f_lineno,)
         self.ei = exc_get_current()
 
     @contextlib.contextmanager
@@ -228,17 +228,16 @@ async def as_completed(fs):
 
 
 @contextlib.asynccontextmanager
-async def multi_awaiter(tasks: typing.Iterable[asyncio.Task]):
-    eah = ExcActuallyHappenAbove(frame_kind=FrameKind.THIS)
+async def multi_awaiter(tasks: typing.Iterable[asyncio.Task], *, excm: ExcMeta):
     try:
         yield
     finally:
-        with eah.format():
+        with excm.format():
             for task in tasks:
-                with eah.suppress():
+                with excm.suppress():
                     await task
-        if eah.r:
-            raise eah.r
+        if excm.r:
+            raise excm.r
 
 
 @contextlib.asynccontextmanager
