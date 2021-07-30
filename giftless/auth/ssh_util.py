@@ -5,6 +5,7 @@ import collections.abc
 import contextlib
 import contextvars
 import dataclasses
+import enum
 import inspect
 import io
 import logging
@@ -27,6 +28,11 @@ ResuT = typing.TypeVar('ResuT', bound='ResurrectableTask')
 DataT = typing.Union[bytes, 'Eof']
 
 ctx_conid_var: contextvars.ContextVar[int] = contextvars.ContextVar('conid', default=-1)
+
+
+class FrameKind(enum.Enum):
+    THIS = 2
+    CALLER = 3
 
 
 class Eof:
@@ -76,10 +82,9 @@ class ExcChainCause:
             self.e = e
 
 
-def exc_get_caller_frame():
+def exc_get_frame(typ: FrameKind):
     s = inspect.stack()
-    assert len(s) >= 3
-    return s[3].frame
+    return s[typ.value].frame
 
 
 def exc_get_current():
@@ -93,7 +98,7 @@ def exc_augment_frame():
         e.with_traceback(tt)
 
 
-def exc_cut_top_tb_n(e: Exception, n: int):
+def exc_cut_top_tb_n(e: BaseException, n: int):
     tb = e.__traceback__
     l = list[types.TracebackType]()
     while tb is not None:
@@ -103,17 +108,17 @@ def exc_cut_top_tb_n(e: Exception, n: int):
     tbn.tb_next = None
 
 
-def exc_cut_bottom_tb(e: Exception):
+def exc_cut_bottom_tb(e: BaseException):
     if e.__traceback__ is not None:
         e.__traceback__ = e.__traceback__.tb_next
 
 
-def exc_add_bottom_tb(e: Exception, frame: types.FrameType):
+def exc_add_bottom_tb(e: BaseException, frame: types.FrameType):
     tb = types.TracebackType(e.__traceback__, frame, frame.f_lasti, frame.f_lineno)
     e.with_traceback(tb)
 
 
-def exc_set_cause_warn(e: Exception, to: typing.Optional[Exception]):
+def exc_set_cause_warn(e: BaseException, to: typing.Optional[BaseException]):
     if e.__cause__ is not None:
         logging.warning(f'Overwriting __cause__ attribute of exception: {type(e)}: {e}')
     e.__cause__ = to
@@ -167,6 +172,40 @@ class ExcChain:
             e.__traceback__ = e.__traceback__.tb_next
 
 
+class ExcActuallyHappenAbove:
+    e: list[BaseException]
+    r: typing.Optional[RuntimeError]
+    fi: types.FrameType
+    ei: typing.Optional[BaseException]
+
+    def __init__(self, frame_kind):
+        self.e = []
+        self.r = None
+        self.fi = exc_get_frame(frame_kind)
+        self.ei = exc_get_current()
+
+    @contextlib.contextmanager
+    def suppress(self):
+        try:
+            yield
+        except Exception as e:
+            if self.ei:
+                exc_filter_context(e, self.ei)
+            self.e.append(e)
+
+    @contextlib.contextmanager
+    def format(self):
+        try:
+            yield
+        finally:
+            if len(self.e):
+                for e in self.e:
+                    exc_cut_bottom_tb(e)
+                    exc_cut_bottom_tb(e)
+                    exc_add_bottom_tb(e, self.fi)
+                self.r = exc_format_multi(self.e)
+
+
 def sock_for_port_serv(port: int):
     for family, typ, proto, canonname, sockaddr in socket.getaddrinfo(None, port, family=socket.AF_INET6, type=socket.SOCK_STREAM, proto=0, flags=socket.AI_PASSIVE | socket.AI_V4MAPPED | socket.AI_ADDRCONFIG):
         with contextlib.suppress(Exception), \
@@ -186,6 +225,20 @@ async def as_completed(fs):
         done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
         for d in done:
             yield d
+
+
+@contextlib.asynccontextmanager
+async def multi_awaiter(tasks: typing.Iterable[asyncio.Task]):
+    eah = ExcActuallyHappenAbove(frame_kind=FrameKind.THIS)
+    try:
+        yield
+    finally:
+        with eah.format():
+            for task in tasks:
+                with eah.suppress():
+                    await task
+        if eah.r:
+            raise eah.r
 
 
 @contextlib.asynccontextmanager
